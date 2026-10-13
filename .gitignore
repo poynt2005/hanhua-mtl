@@ -1,0 +1,36 @@
+# ---- python ----
+.venv/
+__pycache__/
+*.pyc
+
+# ---- credentials / local config (NEVER commit) ----
+config.json
+vast_ssh
+vast_ssh.pub
+.env
+
+# ---- manga / comic content (NEVER commit; public repo) ----
+*.zip
+*.cbz
+*.cbr
+*.epub
+*.rar
+*.7z
+*.pdf
+
+# ---- pipeline working artifacts (contain source/target text) ----
+project.json
+project*.json
+glossary.json
+raw/
+out/
+translated/
+selftest_out/
+*_MTL_zhTW.*
+links.txt
+
+# ---- third-party / reference material kept locally only ----
+llm_handoff_example/
+
+# ---- build artifacts ----
+*.skill

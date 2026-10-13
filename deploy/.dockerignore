@@ -1,0 +1,4 @@
+# Only the two files the image needs; keep the build context tiny.
+*
+!ocr_server.py
+!container_start.sh

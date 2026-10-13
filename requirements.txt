@@ -1,0 +1,10 @@
+Pillow>=10.0.0
+
+# ----- optional, only needed for the matching backend -----
+# opencv-python>=4.9.0      # --ocr opencv  and  --config inpaint=opencv
+# numpy>=1.26               # opencv backend
+# simple-lama-inpainting    # --config inpaint=lama
+# manga-ocr>=0.1.11         # --ocr manga_ocr (Japanese, needs torch)
+# torch>=2.1                # manga-ocr
+# comic-text-detector       # --ocr manga_ocr box detection
+# opencc-python-reimplemented  # simplified -> traditional conversion

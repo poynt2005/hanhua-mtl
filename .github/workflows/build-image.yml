@@ -1,0 +1,56 @@
+name: build-hanhua-gpu
+
+# Build the hanhua GPU image and push it to Docker Hub.
+# No local Docker needed; the runner builds and pushes for you.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   DOCKERUSR   Docker Hub username
+#   DOCKERPASS  Docker Hub password or access token
+#
+# Resulting image:  docker.io/<DOCKERUSR>/hanhua-gpu:1
+# Use it on vast.ai:  --image <DOCKERUSR>/hanhua-gpu:1 --baked
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "deploy/Dockerfile"
+      - "deploy/container_start.sh"
+      - "deploy/ocr_server.py"
+      - ".github/workflows/build-image.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner has ~14 GB free; the CUDA base image plus deps need more.
+      # Drop preinstalled toolchains we do not use to free ~25 GB.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERUSR }}
+          password: ${{ secrets.DOCKERPASS }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: deploy
+          file: deploy/Dockerfile
+          push: true
+          # Keep the image smaller: do NOT bake the ~9 GB translation model here.
+          # The container pulls it at boot, gated on the measured download speed.
+          build-args: |
+            BAKE_SAKURA=0
+          tags: |
+            ${{ secrets.DOCKERUSR }}/hanhua-gpu:1
+            ${{ secrets.DOCKERUSR }}/hanhua-gpu:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
