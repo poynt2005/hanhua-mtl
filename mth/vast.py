@@ -332,9 +332,14 @@ def up(key, workdir, deploy_dir, model=DEFAULT_MODEL, min_vram=24, min_down=200,
         for iid in ids:
             destroy(key, iid)
 
-    # baked=True means the image already has the whole stack (Dockerfile), so we
-    # pass no onstart script and rely on the image CMD.
-    script = None if baked else bootstrap_script(deploy_dir, model)
+    # baked=True means the image already has the whole stack (Dockerfile). But a
+    # vast SSH instance runs its own entrypoint (sshd), so the image CMD does NOT
+    # execute -- we must still start the services via onstart.
+    if baked:
+        script = ("nohup bash /root/container_start.sh >/root/start.log 2>&1 "
+                  "</dev/null & echo started")
+    else:
+        script = bootstrap_script(deploy_dir, model)
     failed_hosts = set()
     tried = 0
     for offer in offers:
