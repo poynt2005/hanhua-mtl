@@ -34,3 +34,5 @@ llm_handoff_example/
 
 # ---- build artifacts ----
 *.skill
+
+vast_blacklist.txt

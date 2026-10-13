@@ -56,10 +56,11 @@ jobs:
           context: deploy
           file: deploy/Dockerfile
           push: true
-          # Keep the image smaller: do NOT bake the ~9 GB translation model here.
-          # The container pulls it at boot, gated on the measured download speed.
+          # Bake the translation model into the image so boots never depend on
+          # HuggingFace throughput (which is unreliable from datacenter IPs).
+          # Image grows to ~15 GB; the pull is from Docker Hub instead.
           build-args: |
-            BAKE_SAKURA=0
+            BAKE_SAKURA=1
           tags: |
             ${{ secrets.DOCKERUSR }}/hanhua-gpu:${{ steps.v.outputs.ver }}
             ${{ secrets.DOCKERUSR }}/hanhua-gpu:latest

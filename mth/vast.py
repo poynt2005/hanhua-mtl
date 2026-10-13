@@ -149,13 +149,13 @@ def bootstrap_script(deploy_dir, model):
     ])
 
 
-def wait_http(host, sakura_port, ocr_port, timeout=1800, min_hf_mbps=8, log=print):
+def wait_http(host, sakura_port, ocr_port, timeout=1800, log=print):
     """Poll the two HTTP endpoints until BOTH are truly ready (SSH-free).
 
-    - Sakura is ready only when /v1/models returns a NON-EMPTY model list
-      (an ollama server with no model pulled answers 200 with data:null).
-    - OCR /health carries hf_mbps; if HF is slower than min_hf_mbps we give up
-      immediately so the caller switches machines instead of stalling.
+    Readiness for the LLM means /v1/models returns a NON-EMPTY model list (a
+    server with no model answers 200 with an empty list). The model is baked into
+    the image, so boots do not depend on HuggingFace throughput; the measured
+    hf_mbps from /health is reported for information only.
     """
     import json as _json
     import urllib.request
@@ -167,12 +167,8 @@ def wait_http(host, sakura_port, ocr_port, timeout=1800, min_hf_mbps=8, log=prin
                 body = urllib.request.urlopen(
                     "http://%s:%s/health" % (host, ocr_port), timeout=10).read().decode("utf-8", "replace")
                 info = _json.loads(body)
-                hf = info.get("hf_mbps")
-                if hf is not None and hf < min_hf_mbps:
-                    log("  hf_mbps=%s < %s -> bad HF network, giving up" % (hf, min_hf_mbps))
-                    return False
                 ocr_ok = True
-                log("  ocr endpoint up (hf_mbps=%s)" % hf)
+                log("  ocr endpoint up (hf_mbps=%s)" % info.get("hf_mbps"))
             except Exception:
                 pass
         if not sakura_ok:
@@ -198,14 +194,32 @@ def instance_info(key, iid):
         return {}
 
 
-def wait_running(key, iid, timeout=300):
+def wait_running(key, iid, timeout=1200, stall_timeout=240, log=print):
+    """Wait for the instance to run, monitoring the image-pull progress.
+
+    The image is large, so a slow-but-progressing pull is fine. We watch
+    `status_msg`; every change is logged (visible progress), and a pull that
+    shows no change for `stall_timeout` seconds is treated as a bad host.
+    """
     start = time.time()
+    last_msg = None
+    last_change = start
+    info = {}
     while time.time() - start < timeout:
         info = instance_info(key, iid)
         if info.get("actual_status") == "running":
             return info
+        msg = (info.get("status_msg") or "").strip()
+        now = time.time()
+        if msg != last_msg:
+            last_msg = msg
+            last_change = now
+            log("  pull %4ds | %s" % (int(now - start), msg[:70]))
+        elif now - last_change > stall_timeout:
+            log("  pull stalled for %ds -> giving up" % stall_timeout)
+            return info
         time.sleep(15)
-    return instance_info(key, iid)
+    return info
 
 
 def ssh_targets(key, iid):
@@ -251,6 +265,25 @@ def destroy_all(key):
     for iid in ids:
         destroy(key, iid)
     return ids
+
+
+def _blacklist_path(workdir):
+    return os.path.join(workdir, "vast_blacklist.txt")
+
+
+def load_blacklist(workdir):
+    path = _blacklist_path(workdir)
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as handle:
+            return {line.strip() for line in handle if line.strip()}
+    return set()
+
+
+def add_blacklist(workdir, host):
+    if not host:
+        return
+    with open(_blacklist_path(workdir), "a", encoding="utf-8") as handle:
+        handle.write(host + "\n")
 
 
 def _ssh(key_path, host, port, command, timeout=600):
@@ -340,7 +373,7 @@ def up(key, workdir, deploy_dir, model=DEFAULT_MODEL, min_vram=24, min_down=200,
                   "</dev/null & echo started")
     else:
         script = bootstrap_script(deploy_dir, model)
-    failed_hosts = set()
+    failed_hosts = load_blacklist(workdir)
     tried = 0
     for offer in offers:
         if tried >= attempts:
@@ -348,7 +381,6 @@ def up(key, workdir, deploy_dir, model=DEFAULT_MODEL, min_vram=24, min_down=200,
         host_ip = offer.get("public_ipaddr") or offer.get("host_id")
         if host_ip in failed_hosts:
             continue
-        tried += 1
         plan = "1 x %s @ $%.3f/hr (inet_down %.0f, reliability %.3f) offer=%s host=%s" % (
             offer.get("gpu_name"), offer.get("dph_total", 0.0), offer.get("inet_down", 0.0),
             offer.get("reliability2", 0.0), offer.get("id"), host_ip)
@@ -360,12 +392,14 @@ def up(key, workdir, deploy_dir, model=DEFAULT_MODEL, min_vram=24, min_down=200,
         if not iid:
             log("create failed for offer %s (unavailable?) -> next" % offer.get("id"))
             continue
+        tried += 1
         try:
             log("instance %s created; waiting for running..." % iid)
-            info = wait_running(key, iid)
+            info = wait_running(key, iid, log=log)
             if info.get("actual_status") != "running":
                 destroy(key, iid)
                 failed_hosts.add(host_ip)
+                add_blacklist(workdir, host_ip)
                 log("instance %s never reached running -> destroyed, next" % iid)
                 continue
 
@@ -376,6 +410,7 @@ def up(key, workdir, deploy_dir, model=DEFAULT_MODEL, min_vram=24, min_down=200,
             if not sakura or not ocr:
                 destroy(key, iid)
                 failed_hosts.add(host_ip)
+                add_blacklist(workdir, host_ip)
                 log("no port mapping on %s -> destroyed, next" % iid)
                 continue
 
@@ -383,6 +418,7 @@ def up(key, workdir, deploy_dir, model=DEFAULT_MODEL, min_vram=24, min_down=200,
             if not wait_http(host, sakura, ocr, timeout=1800, log=log):
                 destroy(key, iid)
                 failed_hosts.add(host_ip)
+                add_blacklist(workdir, host_ip)
                 log("endpoints never came up on %s -> destroyed, next" % iid)
                 continue
             log("endpoints ready")
