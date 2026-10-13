@@ -68,5 +68,5 @@ constraints file protecting CUDA PyTorch) → detector from its code host → ol
 - `bash -n` on the container start script and deploy scripts: pass.
 - `hanhua.py selftest` (mock, both profiles): pass.
 - New flags (`vast up --image/--baked`, `auto --keep-work/--strict`) parse.
-- The Docker image itself: **not built** (no Docker on the authoring machine);
-  its build-time smoke test is the intended validation on first build.
+- The Docker image: **built and pushed successfully** on tag `v0.1.0`; the
+  build-time smoke test passed in CI (13m7s run).

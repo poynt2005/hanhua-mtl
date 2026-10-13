@@ -118,8 +118,12 @@ docker build -f deploy/Dockerfile -t <registry>/hanhua-gpu:1 deploy
 docker push <registry>/hanhua-gpu:1
 ```
 
-`.github/workflows/build-image.yml` builds and pushes automatically (it frees disk
-on the runner first). To rent and deploy with the tool:
+`.github/workflows/build-image.yml` builds and pushes automatically when a
+version tag is pushed to `master` (it frees disk on the runner first, and refuses
+tags that are not on `master`), pushing `<DOCKERUSR>/hanhua-gpu:<version>` and
+`<DOCKERUSR>/hanhua-gpu:latest` to Docker Hub. The image includes a build-time
+smoke test so dependency problems surface during the build, not on a paid box.
+To rent and deploy with the tool:
 
 ```bash
 python hanhua.py vast up --yes --image <registry>/hanhua-gpu:1 --baked --write-config config.json

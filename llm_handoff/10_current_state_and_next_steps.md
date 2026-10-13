@@ -8,7 +8,7 @@
 | `auto` one-shot command | works; default output `<stem>_MTL_zhTW<ext>` |
 | OCR/inpaint service (`deploy/ocr_server.py`) | works; text-based mask, LaMa erase, crops back to original size |
 | Local CPU path | works; inpainting limited to lightweight methods (no LaMa without torch) |
-| GPU image (`deploy/Dockerfile`) | **written and syntax-checked; NOT built or verified** |
+| GPU image (`deploy/Dockerfile`) | **built and pushed** on tag `v0.1.0` (build-time smoke test passed) |
 | Container start script | written and syntax-checked |
 | CI workflow (build + push) | written (uses the repository's Docker Hub secrets) |
 | vast.ai controller (`mth/vast.py`) | works; happy path is HTTP-only (no SSH); leftovers are cleaned; failures destroy the machine |
