@@ -46,6 +46,7 @@ money was lost to repeated mistakes.
 | V39 | standing up the LLM server is painful | binary/glibc and chat-template issues | use a server that handles templates (e.g. ollama) |
 | V40 | a stalled model pull looks "ready" | the server answers 200 with an empty model list | readiness requires a **non-empty** model list |
 | V41 | a bad-network machine wastes 30 minutes pulling | no speed gate | probe the download speed at boot and fail fast |
+| V42 | a prebuilt image boots but its services never start | the instance runs its own entrypoint (sshd), so the image `CMD` is not executed | pass an onstart command that runs the start script |
 
 ## Four root classes
 

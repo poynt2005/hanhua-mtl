@@ -9,7 +9,7 @@ grouped.
 
 | Outcome | Count |
 |---|---|
-| Working (reached readiness and produced output) | 3 |
+| Working (reached readiness and produced output) | 4 |
 | Bad network (download unusably slow / stalled) | 10 |
 | SSH unreachable (turned out to be a client-side key problem, see below) | 8 |
 | Never reached "running" (image load timed out) | 3 |
@@ -41,6 +41,7 @@ grouped.
 | M24 | V100 | mid | very high | endpoints up, model present, erase worked | **SUCCESS** → destroyed |
 | M25 | V100 | low | mid | model download **stalled at 19%** | destroyed |
 | M26, M27 | RTX 3090 ×2 | mid | high | created concurrently by two controller processes | destroyed |
+| M28 | V100 | mid | very high | prebuilt image; fast image pull (~38 MB/s), fast model pull (~264 MB/s), HF probe 32 MB/s | **SUCCESS** (baked image, exact dimensions, 0 violations) → destroyed |
 
 Offers that were already taken (create returned "not available"): 5 separate
 attempts across runs; no instance was created and no meaningful cost accrued.

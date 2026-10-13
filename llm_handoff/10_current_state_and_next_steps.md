@@ -15,6 +15,18 @@
 | Cost-safety docs | playbook + skill + hard rules in place |
 | Term consistency | implemented (extract / review / translate / normalize / verify) |
 | Sample deliverable | produced; **gitignored** (never committed) |
+| End-to-end with the baked image | **verified** (see below) |
+
+## Verified end-to-end run (baked image)
+
+- Rented one machine, pulled the image, started the services via onstart, and ran
+  `auto` against a sample archive.
+- Result: same page count and order, **exact dimensions preserved**, glossary
+  violations **0**.
+- The run cost well under ten cents.
+- One bug found and fixed during this run: a prebuilt image needs an
+  `--onstart-cmd` to start its services (a cloud SSH instance runs its own
+  entrypoint and skips the image `CMD`). See `06_bugs_and_fixes.md` C1.
 
 ## Known issues in the existing sample deliverable
 
