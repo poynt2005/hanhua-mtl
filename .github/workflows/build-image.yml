@@ -1,32 +1,39 @@
 name: build-hanhua-gpu
 
-# Build the hanhua GPU image and push it to Docker Hub.
-# No local Docker needed; the runner builds and pushes for you.
+# Trigger: ONLY when a version tag (v*) is pushed, and only if that tag is on
+# master. A normal push to master does not build; cut a version tag to build.
 #
 # Required repository secrets (Settings -> Secrets and variables -> Actions):
 #   DOCKERUSR   Docker Hub username
 #   DOCKERPASS  Docker Hub password or access token
 #
-# Resulting image:  docker.io/<DOCKERUSR>/hanhua-gpu:1
-# Use it on vast.ai:  --image <DOCKERUSR>/hanhua-gpu:1 --baked
+# Resulting image:  docker.io/<DOCKERUSR>/hanhua-gpu:<version>
+# Use it on vast.ai:  --image <DOCKERUSR>/hanhua-gpu:<version> --baked
 
 on:
-  workflow_dispatch:
   push:
-    paths:
-      - "deploy/Dockerfile"
-      - "deploy/container_start.sh"
-      - "deploy/ocr_server.py"
-      - ".github/workflows/build-image.yml"
+    tags:
+      - "v*"
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Only build tags that are on master (a tag on a side branch is refused).
+      - name: Require the tag to be on master
+        run: |
+          git fetch origin master
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "::error::tag ${GITHUB_REF_NAME} is not on master; refusing to build"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} is on master"
 
       # The runner has ~14 GB free; the CUDA base image plus deps need more.
-      # Drop preinstalled toolchains we do not use to free ~25 GB.
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
@@ -40,6 +47,10 @@ jobs:
           username: ${{ secrets.DOCKERUSR }}
           password: ${{ secrets.DOCKERPASS }}
 
+      - name: Version from tag
+        id: v
+        run: echo "ver=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
       - uses: docker/build-push-action@v6
         with:
           context: deploy
@@ -50,7 +61,7 @@ jobs:
           build-args: |
             BAKE_SAKURA=0
           tags: |
-            ${{ secrets.DOCKERUSR }}/hanhua-gpu:1
+            ${{ secrets.DOCKERUSR }}/hanhua-gpu:${{ steps.v.outputs.ver }}
             ${{ secrets.DOCKERUSR }}/hanhua-gpu:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
