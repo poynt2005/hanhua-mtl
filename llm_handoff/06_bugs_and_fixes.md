@@ -37,6 +37,7 @@ from other documents.
 | S2 | the network check failed almost every machine | it treated an unrelated site as required, and that site rate-limits datacenter IPs | only require the sources actually used |
 | D1 | two machines billed at once | two controller processes were running (an earlier one had not exited) | destroy leftovers before starting; ensure only one controller runs |
 | C1 | a baked image booted but its services never started | a cloud SSH instance runs its **own entrypoint** (sshd), so the image's `CMD` is **not executed** | pass an `--onstart-cmd` that runs the baked start script (do not rely on the image `CMD`) |
+| C2 | good machines rejected because the model download was slow | the boot flow pulled the model from HuggingFace, which throttles datacenter IPs (measured ~4 MB/s) | **bake the model into the image**; readiness no longer depends on HF |
 
 ## D. Quality
 

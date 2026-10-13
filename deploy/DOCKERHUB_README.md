@@ -79,10 +79,13 @@ docker run --gpus all \
 
 ## Image size and the model
 
-The image is about **6.7 GB** and does **not** contain the translation model
-(~9 GB). The model is downloaded on first boot and cached in the container's
-`/root/.ollama`. To bake it into a derived image, build the source Dockerfile
-with `--build-arg BAKE_SAKURA=1` (adds ~9 GB).
+- `0.1.0` (~6.7 GB) does **not** contain the translation model; it is downloaded
+  on first boot (depends on HuggingFace throughput).
+- `0.2.0` / `latest` (~15.5 GB) **bakes the model in**, so boots do not depend on
+  HuggingFace at all. Prefer this tag.
+
+To build your own with the model baked in, build the source Dockerfile with
+`--build-arg BAKE_SAKURA=1`.
 
 ## Using with vast.ai
 

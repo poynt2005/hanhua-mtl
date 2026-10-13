@@ -90,11 +90,11 @@ fallback but the baked image is strongly preferred.
 
 - The image definition, container start script, and CI workflow are written and
   syntax-checked.
-- The image **has been built and pushed** (tag `v0.1.0`). The CI build passed the
-  build-time smoke test, which catches the exact dependency problems previously
-  hit on paid boxes (missing libGL, incompatible `transformers`, missing
-  multipart helper). Image reference: `docker.io/<DOCKERUSR>/hanhua-gpu:0.1.0`
-  (and `:latest`).
+- **`v0.2.0` is built and pushed** and bakes the translation model into the image
+  (~15.5 GB), so **boots no longer depend on HuggingFace throughput**. Readiness
+  is just: the LLM model list is non-empty and the OCR `/health` responds.
+  `v0.1.0` (~6.7 GB) exists too but pulls the model at boot (HF-dependent).
+  Reference: `docker.io/<DOCKERUSR>/hanhua-gpu:0.2.0` (and `:latest`).
 
 ## Endpoint reference
 
