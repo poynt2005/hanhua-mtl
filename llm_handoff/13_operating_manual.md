@@ -104,7 +104,6 @@ python deploy/vast_watchdog.py
 ---
 
 ## 3. Why it works now (the improvements, in order of impact)
-
 1. **Bake the entire environment into an image** (`deploy/Dockerfile`), including
    every model weight, and force the runtime offline
    (`HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE`). This removed the single biggest
@@ -135,6 +134,14 @@ python deploy/vast_watchdog.py
    Destroy only when the work is verified done.
 9. **Verify by content, every time**: page count, page order, image dimensions,
    and translation coverage (blocks with source and non-empty translation).
+10. **Audit detection quality objectively, and fix it adaptively.** Comparing the
+    text-stroke density of each input page with its delivered page found **74 of
+    1034 pages still carrying text that was never erased or translated** (~32 of
+    them real text pages; one book had 20 consecutive pages missed). The server
+    now runs the plain detector pass first and **escalates** to rotated
+    (vertical text) and inverted (white-on-dark) passes only when that pass finds
+    suspiciously little text, with `DET_SIZE` raised 1024 → 1280. The audit is
+    free (no GPU, no viewing) and is the before/after measurement to use.
 
 ---
 
