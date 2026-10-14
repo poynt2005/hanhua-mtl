@@ -1,4 +1,4 @@
-"""Audit detection quality: did any delivered page keep its source text?
+"""Audit detection quality: did any delivered page keep its DIALOGUE text?
 
 Method (free - numpy + opencv only, no GPU, no viewing, no money):
   for every page, measure "text-likeness" = Otsu dark-pixel ratio + the number of
@@ -6,11 +6,19 @@ Method (free - numpy + opencv only, no GPU, no viewing, no money):
   BOTH the input page and the delivered page.
 
   If the delivered page still has the same text-likeness as the source, then
-  nothing was erased or translated there - the detector missed that page.
+  nothing was erased there.
 
-This is the check that found 74 of 1034 delivered pages still carrying text
-(one volume had 20 consecutive missed pages). It is also the before/after
-measurement to use when changing detection.
+READ THIS BEFORE ACTING ON THE RESULT
+-------------------------------------
+The metric cannot tell dialogue from **onomatopoeia / sound effects (SFX)**, and
+this pipeline deliberately keeps SFX (`keep_sfx: true` in the config). A first
+run flagged "74 of 1034 pages still carrying text"; a human looked at the contact
+sheets and found they were almost all SFX, i.e. working as intended.
+
+So treat this as a **triage list, not a defect count**: run
+tools/audit_sheets.py and have a human glance at the sheets. Only pages that
+still show *dialogue in speech bubbles* are real misses. Chasing the raw number
+wasted real time here - see llm_handoff/14_thrashing_postmortem.md.
 
     python tools/audit_detection.py --dir .
 """
@@ -93,8 +101,10 @@ def main():
     print("\n" + "=" * 70)
     print("TOTAL: %d low-block pages, %d of them still carrying text"
           % (total_low, total_still))
-    print("(a low-block page that was NOT translated will show up here; a genuinely")
-    print(" blank/credits page will not, because it has few strokes in the source too)")
+    print("These are a TRIAGE list, not defects: this metric cannot distinguish")
+    print("dialogue from onomatopoeia/SFX, and the pipeline keeps SFX on purpose")
+    print("(keep_sfx: true). Run tools/audit_sheets.py and have a human check which")
+    print("cells still show dialogue in speech bubbles - those are the real misses.")
     return 0
 
 
