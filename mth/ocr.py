@@ -1,6 +1,8 @@
+import http.client
 import json
 import os
 import sys
+import time
 import urllib.request
 
 from . import providers
@@ -141,8 +143,27 @@ def _http(image_path, cfg):
     key = cfg.get("ocr_api_key")
     if key:
         req.add_header("Authorization", "Bearer " + key)
-    with urllib.request.urlopen(req, timeout=int(cfg.get("timeout", 300))) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    timeout = int(cfg.get("timeout", 300))
+
+    # The host's port forward drops non-streaming requests at random (a plain
+    # /prepare carries no bytes until it finishes), so retry instead of losing
+    # the whole run on one dropped connection.
+    attempts = max(1, int(cfg.get("retries", 3)))
+    data = None
+    last = None
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as err:
+            last = err
+            if attempt + 1 < attempts:
+                time.sleep(1.5 * (attempt + 1))
+    if data is None:
+        raise RuntimeError("OCR /prepare failed after %d attempts (%s): %s" % (
+            attempts, url, last))
+
     cleaned = data.get("cleaned") if isinstance(data, dict) else None
     if cleaned:
         import base64

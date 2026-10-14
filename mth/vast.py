@@ -270,6 +270,65 @@ def destroy_all(key):
     ids = [i.get("id") for i in list_instances(key)]
     for iid in ids:
         destroy(key, iid)
+
+
+# --- single-instance invariant -------------------------------------------------
+# HARD RULE: at most ONE instance of ours may exist at any time. A leftover
+# script must never be able to rent a second machine, so every rental path
+# records the instance it owns and a watchdog destroys anything else.
+
+CURRENT_FILE = "vast_current.txt"
+
+
+def current_path(workdir):
+    return os.path.join(workdir, CURRENT_FILE)
+
+
+def set_current(workdir, iid):
+    with open(current_path(workdir), "w", encoding="ascii") as handle:
+        handle.write(str(iid) + "\n")
+
+
+def get_current(workdir):
+    try:
+        with open(current_path(workdir), encoding="ascii") as handle:
+            return int(handle.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def clear_current(workdir):
+    try:
+        os.remove(current_path(workdir))
+    except OSError:
+        pass
+
+
+def owned_instances(key):
+    """Every instance that carries OUR label (never the user's own ones)."""
+    return [i for i in list_instances(key) if i.get("label") == "hanhua"]
+
+
+def enforce_single(key, workdir, keep=None, log=print):
+    """Destroy every instance of ours except `keep` (default: the recorded one).
+
+    This is the guard that makes "two machines at once" impossible: it is called
+    before renting, and by the watchdog while a run is in flight.
+    """
+    keep_ids = {str(keep)} if keep else set()
+    recorded = get_current(workdir)
+    if recorded:
+        keep_ids.add(str(recorded))
+    removed = []
+    for inst in owned_instances(key):
+        iid = str(inst.get("id"))
+        if iid in keep_ids:
+            continue
+        log("ENFORCE-SINGLE: destroying extra instance %s (%s)" % (
+            iid, inst.get("actual_status")))
+        destroy(key, iid)
+        removed.append(iid)
+    return removed
     return ids
 
 
@@ -362,14 +421,16 @@ def up(key, workdir, deploy_dir, model=DEFAULT_MODEL, min_vram=24, min_down=200,
     if not dry_run and not yes:
         raise SystemExit("refusing to rent without --yes")
 
-    # Safety: destroy ONLY our own leftover instances (never the user's others).
-    # A killed previous run could have leaked a machine -> double billing.
-    leftover = [i for i in list_instances(key) if i.get("label") == "hanhua"]
-    if leftover:
-        ids = [i.get("id") for i in leftover]
-        log("leftover hanhua instances %s -> destroying before we start" % ids)
-        for iid in ids:
-            destroy(key, iid)
+    # Safety: at most ONE machine of ours may exist (never the user's others).
+    busy = [i for i in owned_instances(key)
+            if i.get("actual_status") in ("running", "loading")]
+    if busy:
+        raise SystemExit(
+            "refusing to rent: %s is already %s - one machine at a time. "
+            "Use it, or destroy it first." % (
+                [i.get("id") for i in busy],
+                [i.get("actual_status") for i in busy]))
+    enforce_single(key, workdir, keep=None, log=log)
 
     # baked=True means the image already has the whole stack (Dockerfile). But a
     # vast SSH instance runs its own entrypoint (sshd), so the image CMD does NOT
@@ -428,6 +489,7 @@ def up(key, workdir, deploy_dir, model=DEFAULT_MODEL, min_vram=24, min_down=200,
                 log("endpoints never came up on %s -> destroyed, next" % iid)
                 continue
             log("endpoints ready")
+            set_current(workdir, iid)
             return {
                 "instance_id": iid,
                 "api_base": "http://%s:%s/v1" % (host, sakura),

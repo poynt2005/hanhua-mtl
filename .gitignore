@@ -36,3 +36,5 @@ llm_handoff_example/
 *.skill
 
 vast_blacklist.txt
+
+vast_current.txt
