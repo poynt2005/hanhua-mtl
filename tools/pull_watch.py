@@ -74,6 +74,12 @@ def main():
                     help="seconds of continuous 'Retrying' before giving up")
     ap.add_argument("--max-silence", type=int, default=780,
                     help="seconds with no layer completing before giving up")
+    ap.add_argument("--min-minutes", type=float, default=10.0,
+                    help="wait this long before judging the measured rate")
+    ap.add_argument("--min-rate", type=float, default=6.0,
+                    help="MB/s below which the host is not worth keeping")
+    ap.add_argument("--max-eta", type=float, default=40.0,
+                    help="projected minutes to finish; above this the host is dropped")
     ap.add_argument("--destroy", action="store_true",
                     help="destroy the instance when the verdict is bad")
     args = ap.parse_args()
@@ -131,6 +137,19 @@ def main():
             say("VERDICT: BAD - no layer completed for %.0f min (effectively stalled)"
                 % ((now - last_progress) / 60))
             break
+
+        # The two rules above can be defeated by small layers completing every few
+        # minutes while the big ones crawl. Judge the MEASURED RATE directly.
+        elapsed_min = (now - start) / 60.0
+        if elapsed_min >= args.min_minutes and done_bytes > 0:
+            rate = (done_bytes / 1e6) / (now - start)
+            remaining_gb = (total - done_bytes) / 1e9
+            eta_min = (remaining_gb * 1000 / rate) / 60 if rate > 0 else 1e9
+            if rate < args.min_rate or eta_min > args.max_eta:
+                say("VERDICT: BAD - measured %.1f MB/s (%.0f%% done), ETA %.0f min "
+                    "(thresholds: >=%.1f MB/s and <=%.0f min)"
+                    % (rate, 100.0 * done_bytes / total, eta_min, args.min_rate, args.max_eta))
+                break
 
         time.sleep(args.interval)
 
