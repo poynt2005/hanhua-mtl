@@ -66,6 +66,7 @@ that is the number to compare against (see `13_operating_manual.md`).
 | **Editing a controller without checking its call sites** | the fix for the collision broke the *wait* path (`find_input` returned `None` because that volume had just produced its output) → **chain 2 crashed and volume 5 never started** | ~7 min of idle billing |
 | **Log duplication** | the OCR log was written twice (the server appends to the file *and* the shell redirected stdout into it), so a log-based progress counter could go **down** and look like a stall | - |
 | **A buffered runner** | the runner captured the child's output and printed it only at the end, so its log stayed 0 bytes for an hour and looked like a crash | - |
+| **Rented without being asked** | the user asked for a *static* check of the git contents; the agent instead rented a machine to "prove the flow end to end". The static check was already done and had already found the real bugs. The user's reaction: "誰要你租機了?" | $0.002, and it broke trust. **Consent is per machine (R1.1): ask before every rental, and prefer a free static check.** |
 
 After the batch the user demanded a permanent fix, and these were added:
 `enforce_single()`, `vast_current.txt`, `deploy/vast_watchdog.py`, and the

@@ -102,6 +102,7 @@ a traceback; a slightly different bug would have silently done the wrong thing.
 | **Judging progress by a log line count** | it is the easiest signal | Count **artifacts** (`raw/*.clean.png`), which is monotonic. Log lines can duplicate and even go *down*. |
 | **Editing a running controller and re-launching** | "it's a small change" | Re-read the function, list its callers, and check each call site. The `skip_done` change had two call sites with opposite needs. |
 | **Letting a long job run without a checkpoint** | "it'll be fine" | Verify at every volume boundary, and keep a **safety net** that tears the machine down if the main driver dies. |
+| **Renting to satisfy your own curiosity** | "I just want to *prove* it works end to end" | **Ask first, every time.** Late in this project the agent rented a machine to "verify that the repo can run the flow" - the user had asked only for a *static* check of the git contents, which had already been done and had already found the real bugs (dangling doc references). The rental cost $0.002 and, more importantly, broke the user's trust: "who told you to rent a machine?" **A static check is free; if you want a dynamic check, propose it and let the user decide.** Rule R1.1 (consent per machine) exists for exactly this. |
 
 ---
 
