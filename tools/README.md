@@ -16,6 +16,17 @@ secrets. Each one exists because a mistake made it necessary ??see
 | `audit_sheets.py` | `python tools/audit_sheets.py --dir <folder>` | Builds a contact sheet of the low-block pages **from the delivered archives** so a human can eyeball which pages still show the source language. **Do this before acting on the audit number** - it is how the "74 pages" over-call was discovered (they were almost all SFX, which this pipeline keeps on purpose). |
 | `collect.py` | `python tools/collect.py --dir . --dest ComicsZHTW` | Collects the delivered archives into one folder, **verifying page count and order before moving each one**, and writes `MANIFEST.txt`. Nothing unverified can end up in the delivery folder. |
 
+### Diagnostics (read-only; use them when something is off)
+
+| Tool | Run it | What it answers |
+|---|---|---|
+| `stream_check.py` | `python tools/stream_check.py --config config.json` | **Does this endpoint drop non-streaming requests?** This is the experiment that found the root cause of every aborted batch (4/6 non-streaming vs 6/6 streaming). |
+| `llm_check.py` | `python tools/llm_check.py --config config.json` | Is the translation endpoint flaky right now? Hammers it with realistic batches and reports failures. |
+| `prep_time.py` | `python tools/prep_time.py --config config.json --dir . --pages 250` | How long does `/prepare` take on real pages? (A page slower than a host's idle timeout gets dropped.) |
+| `ssh_check.py` | `python tools/ssh_check.py --instance <id>` | Everything about a live machine over SSH: processes, GPU, memory, `/root/ocr.log`, `start.log`, OOM messages. |
+| `quant_eval.py` | `python tools/quant_eval.py --repo <hf-repo>` | **What would a stronger quantisation cost?** Real GGUF sizes from HuggingFace + live vast.ai prices, and the cost per volume. This is how the Q6_K decision was made. |
+| `local_probe.py` | `python tools/local_probe.py --vendor <checkout> --dir . --pages 250` | Exercises the vendored detector's non-model code paths (cv2 on the BGR view, `letterbox`, `refine_mask`, `build_mask`) on a real page, **without torch and without a GPU**. |
+
 ## Typical sequence
 
 ```powershell
