@@ -1,8 +1,8 @@
-# tools/ ??operational scripts that paid for themselves
+# tools/ — operational scripts that paid for themselves
 
 These are the scripts that were actually used to run, verify and audit a batch.
 They are deliberately small and parameterised: no hard-coded user paths, no
-secrets. Each one exists because a mistake made it necessary ??see
+secrets. Each one exists because a mistake made it necessary — see
 `llm_handoff/14_thrashing_postmortem.md`.
 
 | Tool | Run it | Why it exists |

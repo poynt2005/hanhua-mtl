@@ -5,7 +5,9 @@ delivered volumes. It is deliberately unflattering: every failed attempt, every
 wrong diagnosis and every dollar is here, because the failures are the useful
 part (see `14_thrashing_postmortem.md` for the distilled lessons).
 
-**Money for the whole session: $0.974** (vast credit 7.59 → 6.616).
+**Money for the whole session: $0.974.** The account balance is deliberately
+not recorded, in line with the anonymisation rule in `05_machine_reports.md`;
+the per-machine costs are in the table below.
 
 > **Naming note:** scripts named `_something.py` in this log were the author's
 > scratch files during the session. They are **not** in the repository; the ones
