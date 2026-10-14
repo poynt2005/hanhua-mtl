@@ -147,7 +147,7 @@ its output, and `14_thrashing_postmortem.md` records it as a wasted chase.
 | 1 | the run was launched **before the image tag existed** → vast booted an instance reporting `manifest for poynt2005/hanhua-gpu:0.5.0 not found` | 46 s (caught early) | $0.002 | registry tag pre-check (`_pilot_v5.tag_exists`), pitfall V64 |
 | 2 | a host pulled at 1.1 MB/s and the "no layer completed for N minutes" rule never fired, because small layers kept completing | ~19 min | $0.072 | the watchdog now judges the **measured rate** and the **projected ETA** |
 | 3 | another host kept **Retrying** on a 0.09 GB layer (a flaky registry route) | ~35 min (the takeover waited) | $0.125 | `tools/pull_watch.py`: measure, then decide |
-| 4 | **success** - host `159.48.242.16`: 18.8 GB pulled in **6.3 min (~50 MB/s)**, gate passed, 250 pages translated in 3220 s (12.9 s/page), verified, machine destroyed | - | ~$0.22 | - |
+| 4 | **success** - a host that already held the image: 18.8 GB pulled in **6.3 min (~50 MB/s)**, gate passed, 250 pages translated in 3220 s (12.9 s/page), verified, machine destroyed | - | ~$0.22 | - |
 
 The missing control was an **early measured pull check**: the advertised
 bandwidth filter is not evidence, and a 12 GB layer downloads for ~10 minutes

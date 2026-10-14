@@ -111,6 +111,8 @@ Plus two human errors:
 
 ---
 
+| V68 | a rented host's **IP address was written into a tracked document** | this repository is public. The address is not a credential, but it is infrastructure detail, the project rules forbid IPs in tracked files, and it survives in git history even after the line is edited | record a host by its **behaviour** ("a host that already held the image"), never by its address; keep `config.json`, `vast_blacklist.txt`, `vast_current.txt` and the ssh keys gitignored; scan tracked files before pushing (`git grep -nE '[0-9]{1,3}(\.[0-9]{1,3}){3}'`) |
+
 ## 3. Hard rules
 
 **R1 Before renting**
@@ -189,6 +191,15 @@ Plus two human errors:
     undebuggable and wastes a whole rental.
 32. Identify work items unambiguously (two different volumes had 237 pages) -
     page count alone is not an identity. Skip inputs that already have outputs.
+
+**R11 Nothing sensitive in a public repository**
+33. **Never write host IPs, instance ids, account details or keys into tracked
+    files.** This repository is public, and anything committed stays in the
+    history even after you edit the line. Record a host by its *behaviour*, never
+    by its address. Keep `config.json`, `vast_blacklist.txt`, `vast_current.txt`
+    and the ssh keys gitignored, and scan the tracked files before pushing:
+    `git grep -nE '[0-9]{1,3}(\.[0-9]{1,3}){3}'` must return only `127.0.0.1`
+    and `0.0.0.0`.
 
 ## Violations
 

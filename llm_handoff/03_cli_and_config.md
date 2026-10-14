@@ -78,6 +78,8 @@ hanhua.py vast down
 | `keep_sfx` | keep `type: sfx` blocks as-is |
 | `convert_tw` | convert simplified output to Traditional (needs OpenCC) |
 | `timeout` | HTTP timeout |
+| `stream` | **stream LLM responses (default `true`)**. A non-streaming completion is silent while the model generates, and the GPU host's port forward drops the idle socket after ~15 s - measured 4/6 non-streaming requests survived vs 6/6 streaming. Leave it on. |
+| `retries` | bounded retries for transient transport drops (default `3`), used by both the LLM and the OCR client |
 | `pattern` | image glob when reading a folder |
 | `output_format` / `keep_ext` | output format; `keep_ext` preserves the source extension |
 
