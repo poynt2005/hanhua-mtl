@@ -30,12 +30,13 @@
 ARG BASE=pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
 FROM ${BASE}
 
-ARG SAKURA_MODEL=sakura-q6k
-# Q6_K: the file WITHOUT a quant suffix is Q6_K (the SakuraLLM authors' own
-# deployment tutorial uses exactly this file). Measured quality: llama.cpp lists
-# Q6_K at +0.0044 perplexity vs +0.0535 for Q4_K_M. It needs ~16 GB VRAM, so it
-# still fits a 24 GB card - the only cost is ~25% slower generation.
-ARG SAKURA_MODEL_URL=https://huggingface.co/SakuraLLM/Sakura-GalTransl-14B-v3.8/resolve/main/Sakura-Galtransl-14B-v3.8.gguf
+ARG SAKURA_MODEL=sakura-qwen3-q6k
+# Sakura-14B-Qwen3-v1.5 (Q6_K): the newest 14B Sakura, same size and VRAM as the
+# previous GalTransl-14B-v3.8 Q6_K, so it is a free upgrade in quality.
+#   file: sakura-14b-qwen3-v1.5-q6k.gguf  (12.12 GB)
+# NOTE: this release is marked "非正式版" (pre-release) and it recommends a
+# DIFFERENT system prompt - see SAKURA_SYSTEM in mth/providers.py.
+ARG SAKURA_MODEL_URL=https://huggingface.co/SakuraLLM/Sakura-14B-Qwen3-v1.5-GGUF/resolve/main/sakura-14b-qwen3-v1.5-q6k.gguf
 ARG BAKE_SAKURA=0
 
 ENV DEBIAN_FRONTEND=noninteractive \

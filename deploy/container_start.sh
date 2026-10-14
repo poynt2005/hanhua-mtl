@@ -13,13 +13,13 @@ export PATH=/usr/local/bin:/opt/conda/bin:$PATH
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export OLLAMA_HOST="0.0.0.0:8000"
-export OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}"
+export OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-16384}"
 export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}"
 
-SAKURA_MODEL="${SAKURA_MODEL:-sakura-q6k}"
-# The unsuffixed GGUF is Q6_K (see deploy/Dockerfile). We import it with a
-# Modelfile rather than `ollama pull :Q6_K`, which cannot resolve.
-MODEL_URL="${SAKURA_MODEL_URL:-https://huggingface.co/SakuraLLM/Sakura-GalTransl-14B-v3.8/resolve/main/Sakura-Galtransl-14B-v3.8.gguf}"
+SAKURA_MODEL="${SAKURA_MODEL:-sakura-qwen3-q6k}"
+# Sakura-14B-Qwen3-v1.5 Q6_K (12.12 GB). Imported with a Modelfile rather than
+# `ollama pull :Q6_K`, which cannot resolve for this repo either.
+MODEL_URL="${SAKURA_MODEL_URL:-https://huggingface.co/SakuraLLM/Sakura-14B-Qwen3-v1.5-GGUF/resolve/main/sakura-14b-qwen3-v1.5-q6k.gguf}"
 
 # OCR service first, so /health is reachable while everything else is starting.
 # It runs under a restart loop: a single bad page must not take the whole service

@@ -409,7 +409,7 @@ def ensure_ssh_key(key, workdir):
     return priv
 
 
-DEFAULT_MODEL = "sakura-q6k"
+DEFAULT_MODEL = "sakura-qwen3-q6k"
 
 
 def up(key, workdir, deploy_dir, model=DEFAULT_MODEL, min_vram=24, min_down=200,
