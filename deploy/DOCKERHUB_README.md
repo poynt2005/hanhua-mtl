@@ -14,7 +14,7 @@ Source code and documentation: https://github.com/poynt2005/hanhua-mtl
 | CUDA + PyTorch runtime base | GPU compute |
 | `manga-ocr` | Japanese manga OCR |
 | `easyocr` | text-region detection (fallback detector) |
-| `comic-text-detector` | segmentation-capable text detection (from its code host) |
+| `comic-text-detector` | segmentation-capable text detection (vendored at a pinned commit) |
 | `simple-lama-inpainting` (LaMa) | neural text removal |
 | `ollama` | OpenAI-compatible LLM server |
 | `libgl1`, `libglib2.0-0` | required by OpenCV |
@@ -26,7 +26,7 @@ on a synthetic page).
 
 ## Tags
 
-- `0.1.0`, `latest`
+- `0.5.0`, `latest`
 
 Platform: `linux/amd64`.
 
@@ -51,15 +51,15 @@ Platform: `linux/amd64`.
 ```bash
 docker run --gpus all \
   -p 8000:8000 -p 8080:8080 \
-  poynt2005/hanhua-gpu:0.1.0
+  poynt2005/hanhua-gpu:0.5.0
 ```
 
 ## Environment variables
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SAKURA_MODEL` | a visual-novel-tuned 14B GGUF on HuggingFace | model to pull |
-| `OLLAMA_CONTEXT_LENGTH` | `8192` | LLM context length |
+| `SAKURA_MODEL` | `sakura-qwen3-q6k` (Sakura-14B-Qwen3-v1.5 at Q6_K) | the model baked in / to pull |
+| `OLLAMA_CONTEXT_LENGTH` | `16384` | LLM context length |
 | `OLLAMA_KEEP_ALIVE` | `30m` | how long to keep the model loaded |
 | `PORT` | `8080` | OCR service port |
 | `OCR_TOKEN` | empty | if set, `/ocr` and `/prepare` require `Authorization: Bearer <token>` |
@@ -86,9 +86,14 @@ baked weights load with zero network calls.
 
 - `0.1.0` (~6.7 GB) does **not** contain the translation model; it is downloaded
   on first boot (depends on HuggingFace throughput).
-- `0.2.2` / `latest` (~15.5 GB) bakes the model **and every OCR / inpainting
-  weight** into fixed cache paths, and forces the runtime offline, so a boot makes
-  no network calls at all. Prefer this tag.
+- `0.2.2` (~15.5 GB) bakes the model **and every OCR / inpainting weight** into
+  fixed cache paths, and forces the runtime offline, so a boot makes no network
+  calls at all.
+- **`0.5.0` / `latest` (~18.7 GB) is the current image.** It adds the
+  **Sakura-14B-Qwen3-v1.5 Q6_K** translation model (12.12 GB, imported from its
+  GGUF via a Modelfile — the `:Q6_K` tag does not resolve for these repos), a
+  **16384-token context**, the model's own recommended system prompt, and
+  **adaptive multi-variant text detection**. Prefer this tag.
 
 To build your own with the model baked in, build the source Dockerfile with
 `--build-arg BAKE_SAKURA=1`.
@@ -97,7 +102,7 @@ To build your own with the model baked in, build the source Dockerfile with
 
 ```bash
 # rent + deploy with the hanhua CLI
-python hanhua.py vast up --yes --image poynt2005/hanhua-gpu:0.2.2 --baked --write-config config.json
+python hanhua.py vast up --yes --image poynt2005/hanhua-gpu:0.5.0 --baked --write-config config.json
 # translate, then tear down
 python hanhua.py auto -i book.cbz --ocr http --profile sakura
 python hanhua.py vast down

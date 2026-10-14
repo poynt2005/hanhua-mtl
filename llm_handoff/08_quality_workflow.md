@@ -70,6 +70,18 @@ The self-hosted model outputs simplified Chinese. With `convert_tw` enabled the
 tool converts to Traditional (Taiwan) using OpenCC (`s2twp`). If OpenCC is not
 installed, the conversion is skipped.
 
+## What the pipeline deliberately does *not* change
+
+Onomatopoeia and sound effects (`type: sfx`) are **kept as-is** by default
+(`keep_sfx: true`). An automated audit that compares the input page with the
+delivered page will flag those pages as "unchanged" - and that is **intended, not
+a defect**: the stroke-density metric cannot tell dialogue from SFX. In this
+project a first audit called 74 of 1034 pages defective; they were almost all
+SFX, and a "fix" was built and measured before anyone looked at the pages
+(`06_bugs_and_fixes.md` G17). Produce the contact sheets
+(`tools/audit_sheets.py`) and have a human glance at them before treating a
+flagged page as a defect.
+
 ## Honest limitation
 
 The consistency tooling is only as good as the glossary. For a short work with a

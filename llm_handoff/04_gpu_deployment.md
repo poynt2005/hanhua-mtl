@@ -93,20 +93,34 @@ python hanhua.py vast up --yes --image <registry>/hanhua-gpu:1 --baked \
 | Generic image + onstart install | no image available | 8–15 minutes, fragile |
 
 The generic mode embeds the install as a base64 onstart script; it exists as a
-fallback but the baked image is strongly preferred.
+fallback but the baked image is strongly preferred. Note that the generic
+fallback predates the 16k-context change and still starts the LLM with an
+**8192** context (`mth/vast.py`), so prefer the baked image for quality.
 
 ## Current state (important)
 
-- The image definition, container start script, and CI workflow are written and
-  syntax-checked.
-- **`v0.2.2` is the current image**: it bakes the translation model **and every
-  OCR / inpainting weight** into fixed cache paths, and forces the runtime offline,
-  so a boot makes no network calls at all. The build smoke test runs offline and
-  fails if any cache is incomplete.
-- History: `v0.2.0` baked the model but still let `transformers` phone HuggingFace
-  on every load (see `06_bugs_and_fixes.md` G9); `v0.1.0` (~6.7 GB) fetched the
-  model at boot and was HF-dependent.
-  Reference: `docker.io/<DOCKERUSR>/hanhua-gpu:0.2.2` (and `:latest`).
+- **`v0.5.0` (~18.7 GB) is the current image**: it bakes **every** weight
+  (manga-ocr, EasyOCR, LaMa, comic-text-detector **and** the translation model)
+  into fixed cache paths, forces the runtime offline, and its build smoke test
+  blocks all outbound sockets and fails if any cache is incomplete.
+- The translation model is **Sakura-14B-Qwen3-v1.5 at Q6_K** (12.12 GB),
+  imported from its GGUF with a Modelfile (the `:Q6_K` tag does not resolve for
+  these repos - see `13_operating_manual.md`), running with a **16384-token
+  context** and **that release's own recommended system prompt**. Q6_K costs
+  ~25% more generation time than Q4_K_M and still fits a 24 GB card.
+- **comic-text-detector is vendored** at a pinned commit (it has no package
+  metadata, so `pip install` is impossible), with its `pyclipper` / `shapely` /
+  `torchsummary` deps and a patched-out `wandb` import.
+- Detection is **adaptive**: a plain pass first, escalating to rotated (vertical
+  text) and inverted (white-on-dark) passes when it finds suspiciously little
+  text.
+- History: `v0.4.0` moved to the Qwen3 model, Q6_K and the 16k context;
+  `v0.3.0` switched to Q6_K and fixed the quant-tag trap; `v0.2.2` baked every
+  weight, vendored the detector and forced the runtime offline; `v0.2.0` baked
+  the model but still let `transformers` phone HuggingFace on every load (see
+  `06_bugs_and_fixes.md` G9); `v0.1.0` (~6.7 GB) fetched the model at boot and
+  was HF-dependent.
+  Reference: `docker.io/poynt2005/hanhua-gpu:0.5.0` (and `:latest`).
 
 ## Endpoint reference
 

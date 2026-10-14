@@ -19,6 +19,8 @@
   "keep_sfx": true,
   "convert_tw": true,
   "timeout": 300,
+  "stream": true,
+  "retries": 3,
   "pattern": "*.png",
   "output_format": "png"
 }

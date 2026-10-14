@@ -1,5 +1,12 @@
 # 07 — Code review
 
+> **Historical.** This is the review as performed early in the project (against
+> `v0.1.0`). Every finding below was fixed then. The code has changed a lot
+> since: the detector is now **vendored**, the LLM client **streams**, detection
+> is **adaptive**, and the image is at **`v0.5.0`**. For the current state read
+> `10_current_state_and_next_steps.md`; for the current tools and tests read
+> `09_testing_and_verification.md`.
+
 A strict review of the Dockerfile, the vast.ai controller, the OCR service, and
 the pipeline modules. Findings marked 🔴 caused money or data loss.
 
