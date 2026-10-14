@@ -8,7 +8,7 @@
 | `auto` one-shot command | works; default output `<stem>_MTL_zhTW<ext>` |
 | OCR/inpaint service (`deploy/ocr_server.py`) | works; text-based mask, LaMa erase, crops back to original size |
 | Local CPU path | works; inpainting limited to lightweight methods (no LaMa without torch) |
-| GPU image (`deploy/Dockerfile`) | **v0.2.0 built and pushed** (model baked in, ~15.5 GB; readiness no longer HF-dependent) |
+| GPU image (`deploy/Dockerfile`) | **v0.2.2 built and pushed** (~15.5 GB): the translation model plus every OCR / inpainting weight baked into fixed cache paths, and the runtime forced offline; readiness no longer HF-dependent |
 | Container start script | written and syntax-checked |
 | CI workflow (build + push) | written (uses the repository's Docker Hub secrets) |
 | vast.ai controller (`mth/vast.py`) | works; happy path is HTTP-only (no SSH); leftovers are cleaned; failures destroy the machine |
@@ -27,6 +27,18 @@
 - One bug found and fixed during this run: a prebuilt image needs an
   `--onstart-cmd` to start its services (a cloud SSH instance runs its own
   entrypoint and skips the image `CMD`). See `06_bugs_and_fixes.md` C1.
+
+## Pilot on a full volume (this changed the image)
+
+- A 20-page pilot on a much larger archive exposed two baked-image defects:
+  - **G9** — the first `/prepare` failed because `transformers` still phoned
+    HuggingFace on model load even with the weights cached. The image now forces
+    the runtime offline and bakes every used weight into a fixed cache path.
+  - **G10** — the text detector had silently degraded to rectangle boxes (its
+    weights were never baked and its device was hard-coded). The weights are now
+    baked and the build smoke test asserts the detector loads.
+- See `12_hf_network_audit.md` for the full list of network / HuggingFace
+  touchpoints.
 
 ## Known issues in the existing sample deliverable
 
@@ -58,8 +70,8 @@
 
 ### P1 — image hardening
 - Pin the base image by digest.
-- Explicitly download/verify the segmentation detector weights, or assert it
-  loads at build time.
+- ~~Download/verify the segmentation detector weights, or assert the detector
+  loads at build time.~~ **Done** in v0.2.2 (see G10).
 
 ### P2 — nice to have
 - Retry per page in the HTTP OCR client.
@@ -75,7 +87,7 @@
 
 ## If you are picking this up
 
-1. Read `INDEX.md`, then `01`→`11`.
+1. Read `INDEX.md`, then `01`→`12`.
 2. Run `selftest` and `auto --ocr mock` to confirm the pipeline.
 3. Build the image and run one real pass.
 4. Ask the user to review the output before spending more on machines.

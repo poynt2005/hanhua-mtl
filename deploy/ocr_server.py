@@ -15,6 +15,7 @@ GET  /health
 import base64
 import io
 import os
+import sys
 
 import numpy as np
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
@@ -24,6 +25,10 @@ app = FastAPI(title="manga ocr+inpaint server")
 
 TOKEN = os.environ.get("OCR_TOKEN", "")
 DILATE = int(os.environ.get("INPAINT_DILATE", "9"))
+
+# Vendored comic-text-detector checkout (see deploy/Dockerfile). Upstream ships
+# no package metadata, so it can only be used as a plain directory of modules.
+DETECTOR_DIR = os.environ.get("COMIC_TEXT_DETECTOR_DIR", "/opt/comic-text-detector")
 
 _reader = None
 _mocr = None
@@ -48,17 +53,60 @@ def get_mocr():
     return _mocr
 
 
+def _pick_device():
+    """Prefer CUDA only when a GPU is actually visible.
+
+    Hard-coding "cuda" made the detector fail to load anywhere without a GPU
+    (including the build-time smoke test), which silently downgraded detection
+    to EasyOCR. `DEVICE` still overrides when set.
+    """
+    import torch
+    return os.environ.get("DEVICE") or ("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _import_text_detector():
+    """Return the TextDetector class from the vendored comic-text-detector.
+
+    The upstream project ships no package metadata (no setup.py / pyproject.toml)
+    and uses top-level imports, so the build clones it to a fixed directory and
+    that directory is APPENDED to sys.path — appended, never prepended, because
+    the checkout has generic top-level names (`utils`, `models`) that must not
+    shadow site-packages. A pip-installed package is accepted as a fallback.
+    """
+    if DETECTOR_DIR and os.path.isdir(DETECTOR_DIR) and DETECTOR_DIR not in sys.path:
+        sys.path.append(DETECTOR_DIR)
+    errors = []
+    for module_name in ("inference", "comic_text_detector.inference"):
+        try:
+            module = __import__(module_name, fromlist=["TextDetector"])
+            return module.TextDetector
+        except Exception as exc:  # noqa: BLE001
+            errors.append("%s: %s" % (module_name, exc))
+    raise ImportError("; ".join(errors))
+
+
+def _detector_weights():
+    for candidate in (
+        os.environ.get("COMIC_TEXT_DETECTOR_WEIGHTS", ""),
+        os.path.join(DETECTOR_DIR, "data", "comictextdetector.pt"),
+    ):
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def get_detector():
     """comic-text-detector gives boxes AND a per-pixel text mask (general)."""
     global _detector
     if _detector is None:
         try:
-            import comic_text_detector
-            from comic_text_detector.inference import TextDetector
-            model_path = os.path.join(os.path.dirname(comic_text_detector.__file__),
-                                      "data", "comictextdetector.pt")
-            _detector = TextDetector(model_path=model_path, input_size=1024,
-                                     device=os.environ.get("DEVICE", "cuda"), act="leaky")
+            weights = _detector_weights()
+            if not weights:
+                raise FileNotFoundError(
+                    "comictextdetector.pt not found (looked under %s)" % DETECTOR_DIR)
+            detector_cls = _import_text_detector()
+            _detector = detector_cls(model_path=weights, input_size=1024,
+                                     device=_pick_device(), act="leaky")
         except Exception as exc:  # noqa: BLE001
             print("[warn] comic-text-detector unavailable: %s" % exc)
             _detector = False
@@ -74,19 +122,24 @@ def get_lama():
 
 
 def detect(img):
-    """Return (boxes, mask_or_None)."""
+    """Return (boxes, text_mask_or_None).
+
+    When comic-text-detector is available the second element is the model's
+    refined per-pixel text mask (used directly for inpainting). Otherwise it is
+    None and build_mask falls back to Otsu inside the EasyOCR boxes.
+    """
     arr = np.array(img)[:, :, ::-1]
     det = get_detector()
     if det is not None:
         try:
-            mask, groups, _ = det(arr)
+            _mask, mask_refined, blocks = det(arr)
             boxes = []
-            for group in groups:
-                for line in group:
-                    xs = [p[0] for p in line]
-                    ys = [p[1] for p in line]
+            for block in blocks:
+                for line in getattr(block, "lines", None) or []:
+                    xs = [point[0] for point in line]
+                    ys = [point[1] for point in line]
                     boxes.append([int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))])
-            return boxes, np.asarray(mask)
+            return boxes, np.asarray(mask_refined)
         except Exception as exc:  # noqa: BLE001
             print("[warn] detector failed, falling back to easyocr: %s" % exc)
     results = get_reader().readtext(np.array(img), detail=1, paragraph=False)

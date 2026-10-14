@@ -22,9 +22,16 @@ not re-downloaded). The image adds:
 - a constraints file that stops pip from replacing CUDA PyTorch with a CPU wheel
 - the detector installed from its code host (it is **not on the package index**)
 - ollama
-- **pre-downloaded OCR / inpainting weights** so boots do not fetch them
-- a **build-time smoke test** that imports the service and actually calls
-  `/prepare` on a synthetic image
+- **every model weight baked in** into fixed cache paths: manga-ocr
+  (HuggingFace), EasyOCR, LaMa, and comic-text-detector — boots never fetch a
+  model
+- **comic-text-detector vendored** at a pinned commit (it has no package metadata,
+  so `pip install` is impossible), plus its `pyclipper` / `shapely` /
+  `torchsummary` deps and a patched-out `wandb` import
+- the runtime **forced offline** (`HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE`)
+- a **build-time smoke test that blocks every outbound socket**, then asserts the
+  detector, LaMa and manga-ocr all load and that `/prepare` works — a
+  machine-checked "fully offline" guarantee
 
 Optional build arg `BAKE_SAKURA=1` also bakes the translation model (~9 GB) into
 the image, removing the boot-time download.
@@ -41,13 +48,13 @@ disk on the runner first, because the base image plus deps is large).
 
 ## Container start (`deploy/container_start.sh`)
 
-1. Probe the download speed of the model host and write it to a file (exposed by
-   `/health` as `hf_mbps`).
-2. Start the OCR service **first**, so `/health` is reachable while any model
-   download is running.
-3. Start the LLM server.
-4. Pull the model **only if** it is not already baked in and the measured speed is
-   above a threshold; otherwise skip (so the controller can fail fast).
+1. Start the OCR service **first**, so `/health` is reachable immediately.
+2. Start the LLM server.
+3. If the model is already baked in (the normal case) it does **nothing else** —
+   no HuggingFace probe, no download.
+4. Only in the non-baked fallback: probe the model host's speed, write it to a file
+   (exposed by `/health` as `hf_mbps`), and pull the model if the speed is above a
+   threshold; otherwise skip so the controller can fail fast.
 
 ## Readiness detection (client side)
 
@@ -55,8 +62,10 @@ disk on the runner first, because the base image plus deps is large).
 
 - the LLM endpoint returns a **non-empty model list** (a server with no model
   still answers 200 with an empty list — that must not count as ready), and
-- the OCR `/health` responds, and its `hf_mbps` is at or above the threshold
-  (otherwise it gives up immediately and switches machines).
+- the OCR `/health` responds.
+
+`hf_mbps` is reported by `/health` for information only; readiness never gates on
+HuggingFace speed, because the models are baked into the image.
 
 ## The `vast` command
 
@@ -90,11 +99,14 @@ fallback but the baked image is strongly preferred.
 
 - The image definition, container start script, and CI workflow are written and
   syntax-checked.
-- **`v0.2.0` is built and pushed** and bakes the translation model into the image
-  (~15.5 GB), so **boots no longer depend on HuggingFace throughput**. Readiness
-  is just: the LLM model list is non-empty and the OCR `/health` responds.
-  `v0.1.0` (~6.7 GB) exists too but pulls the model at boot (HF-dependent).
-  Reference: `docker.io/<DOCKERUSR>/hanhua-gpu:0.2.0` (and `:latest`).
+- **`v0.2.2` is the current image**: it bakes the translation model **and every
+  OCR / inpainting weight** into fixed cache paths, and forces the runtime offline,
+  so a boot makes no network calls at all. The build smoke test runs offline and
+  fails if any cache is incomplete.
+- History: `v0.2.0` baked the model but still let `transformers` phone HuggingFace
+  on every load (see `06_bugs_and_fixes.md` G9); `v0.1.0` (~6.7 GB) fetched the
+  model at boot and was HF-dependent.
+  Reference: `docker.io/<DOCKERUSR>/hanhua-gpu:0.2.2` (and `:latest`).
 
 ## Endpoint reference
 

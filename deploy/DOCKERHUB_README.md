@@ -64,25 +64,31 @@ docker run --gpus all \
 | `PORT` | `8080` | OCR service port |
 | `OCR_TOKEN` | empty | if set, `/ocr` and `/prepare` require `Authorization: Bearer <token>` |
 | `INPAINT_DILATE` | `9` | mask dilation for text removal |
-| `DEVICE` | `cuda` | device for the detector |
+| `DEVICE` | auto (cuda if a GPU is visible, else cpu) | device for the detector |
 
 ## Startup behaviour
 
-1. Probes the download speed of the model host and writes it to
-   `/root/hf_mbps.txt` (exposed as `hf_mbps` in `/health`).
-2. Starts the OCR service first, so `/health` is reachable while a model download
-   is running.
-3. Starts the LLM server.
-4. Pulls the model **only if** it is not already present and the measured speed
-   is above a threshold; otherwise it skips, so a controller can fail fast and
-   switch machines instead of waiting.
+All model weights are baked in, so a normal boot makes **no network calls at all**.
+
+1. Starts the OCR service first, so `/health` is reachable immediately.
+2. Starts the LLM server.
+3. If the model is already baked in (the default) it does nothing else — no
+   HuggingFace probe, no download.
+4. Only in the non-baked fallback: probes the model host's speed into
+   `/root/hf_mbps.txt` (exposed as `hf_mbps` in `/health`) and pulls the model if
+   the speed is above a threshold; otherwise it skips, so a controller can fail
+   fast and switch machines instead of waiting.
+
+The runtime is forced offline (`HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE`) so the
+baked weights load with zero network calls.
 
 ## Image size and the model
 
 - `0.1.0` (~6.7 GB) does **not** contain the translation model; it is downloaded
   on first boot (depends on HuggingFace throughput).
-- `0.2.0` / `latest` (~15.5 GB) **bakes the model in**, so boots do not depend on
-  HuggingFace at all. Prefer this tag.
+- `0.2.2` / `latest` (~15.5 GB) bakes the model **and every OCR / inpainting
+  weight** into fixed cache paths, and forces the runtime offline, so a boot makes
+  no network calls at all. Prefer this tag.
 
 To build your own with the model baked in, build the source Dockerfile with
 `--build-arg BAKE_SAKURA=1`.
@@ -91,7 +97,7 @@ To build your own with the model baked in, build the source Dockerfile with
 
 ```bash
 # rent + deploy with the hanhua CLI
-python hanhua.py vast up --yes --image poynt2005/hanhua-gpu:0.1.0 --baked --write-config config.json
+python hanhua.py vast up --yes --image poynt2005/hanhua-gpu:0.2.2 --baked --write-config config.json
 # translate, then tear down
 python hanhua.py auto -i book.cbz --ocr http --profile sakura
 python hanhua.py vast down
@@ -100,6 +106,12 @@ python hanhua.py vast down
 ## License / third-party notice
 
 This image bundles third-party tools and downloads third-party model weights;
-each carries its own license. In particular the recommended translation model
-family is released under a **non-commercial** license — do not use it
-commercially. Review each dependency's license before use.
+each carries its own license. In particular:
+
+- the recommended translation model family is released under a **non-commercial**
+  license — do not use it commercially;
+- **comic-text-detector** is vendored (a pinned commit of `dmMaze/comic-text-detector`)
+  and is licensed **GPL-3.0**; its `LICENSE` file is kept inside the image at
+  `/opt/comic-text-detector/LICENSE`.
+
+Review each dependency's license before use.

@@ -1,11 +1,64 @@
 import json
 import os
+import sys
 import urllib.request
 
 from . import providers
 from .schema import new_block
 
 _MANGA_OCR = None
+
+# Vendored comic-text-detector. Upstream ships no package metadata, so it is
+# used from a directory (the image vendors it to /opt/comic-text-detector); a
+# pip-installed package is accepted as a fallback.
+_DETECTOR_DIRS = (
+    os.environ.get("COMIC_TEXT_DETECTOR_DIR", ""),
+    "/opt/comic-text-detector",
+)
+
+
+def _text_detector_class():
+    for directory in _DETECTOR_DIRS:
+        if directory and os.path.isdir(directory) and directory not in sys.path:
+            # append, never prepend: the checkout has generic top-level names
+            # (`utils`, `models`) that must not shadow site-packages
+            sys.path.append(directory)
+    errors = []
+    for module_name in ("inference", "comic_text_detector.inference"):
+        try:
+            module = __import__(module_name, fromlist=["TextDetector"])
+            return module.TextDetector
+        except Exception as exc:  # noqa: BLE001
+            errors.append("%s: %s" % (module_name, exc))
+    raise RuntimeError("comic-text-detector not importable (%s)" % "; ".join(errors))
+
+
+def _detector_weights():
+    override = os.environ.get("COMIC_TEXT_DETECTOR_WEIGHTS", "")
+    for directory in ("",) + _DETECTOR_DIRS:
+        candidate = (override if directory == "" else
+                     os.path.join(directory, "data", "comictextdetector.pt"))
+        if candidate and os.path.exists(candidate):
+            return candidate
+    raise RuntimeError(
+        "comictextdetector.pt not found; set COMIC_TEXT_DETECTOR_DIR to a "
+        "comic-text-detector checkout")
+
+
+def detect_boxes(image, device="cpu"):
+    """Text-line boxes from comic-text-detector (returns [(x0, y0, x1, y1), ...])."""
+    import numpy as np
+    detector = _text_detector_class()(model_path=_detector_weights(),
+                                      input_size=1024, device=device, act="leaky")
+    arr = np.array(image.convert("RGB"))[:, :, ::-1]
+    _mask, _mask_refined, blocks = detector(arr)
+    boxes = []
+    for block in blocks:
+        for line in getattr(block, "lines", None) or []:
+            xs = [point[0] for point in line]
+            ys = [point[1] for point in line]
+            boxes.append([int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))])
+    return boxes
 
 
 def _load_manga_ocr():
@@ -128,26 +181,15 @@ def _opencv(image_path, width, height, cfg):
 
 def _manga_ocr(image_path, width, height, cfg):
     from PIL import Image
+    image = Image.open(image_path).convert("RGB")
     try:
-        from comic_text_detector.inference import TextDetector
-        import comic_text_detector
-    except Exception as exc:
+        boxes = detect_boxes(image, device=cfg.get("ocr_device", "cpu"))
+    except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
             "manga_ocr backend needs comic-text-detector for boxes: %s\n"
-            "install with: pip install manga-ocr comic-text-detector" % exc
+            "point COMIC_TEXT_DETECTOR_DIR at a comic-text-detector checkout" % exc
         )
-    import numpy as np
-    model_path = os.path.join(os.path.dirname(comic_text_detector.__file__), "data", "comictextdetector.pt")
-    detector = TextDetector(model_path=model_path, input_size=1024, device="cpu", act="leaky")
-    bgr = np.array(Image.open(image_path).convert("RGB"))[:, :, ::-1]
-    mask, blocks_raw, _ = detector(bgr)
-    boxes = []
-    for blk in blocks_raw:
-        for line in blk:
-            xs = [pt[0] for pt in line]
-            ys = [pt[1] for pt in line]
-            boxes.append([int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))])
-    texts = recognize_manga_ocr(Image.open(image_path).convert("RGB"), boxes)
+    texts = recognize_manga_ocr(image, boxes)
     return [{
         "bbox": b,
         "ocr": t,

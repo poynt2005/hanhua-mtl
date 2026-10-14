@@ -22,6 +22,7 @@ agent needs to continue seamlessly from the current state.
 | 9 | `09_testing_and_verification.md` | selftest, dry runs, delivery verification |
 | 10 | `10_current_state_and_next_steps.md` | exact state + prioritised next steps |
 | 11 | `11_lessons_and_guardrails.md` | distilled cost-safety rules |
+| 12 | `12_hf_network_audit.md` | every function that can reach the network, and every HuggingFace touchpoint |
 
 ## Related documents (kept in place, not duplicated here)
 

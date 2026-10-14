@@ -24,6 +24,8 @@ from other documents.
 | G6 | the LLM server did not survive | background processes started during provisioning needed all three fds redirected | `nohup ... >log 2>&1 </dev/null &` |
 | G7 | output image dimensions changed | the inpainting model pads to a multiple of 8 and the result was not cropped back | crop to the original size |
 | G8 | a stalled model download looked "ready" | the LLM server answers 200 with an empty model list | readiness requires a **non-empty** model list |
+| G9 | on a baked image, the **first** `/prepare` failed (`Remote end closed connection`) though `/health` worked | `transformers` performs a Hub *freshness* check on every model load even when the weights are cached; on a host that cannot reach HuggingFace it retries until the request fails | bake the weights into fixed cache paths and force the runtime offline (`HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`) |
+| G10 | text detection silently degraded to EasyOCR boxes; `detector` was always `false` | the detector **cannot be pip-installed at all** (no `setup.py`/`pyproject.toml`, not on PyPI, top-level imports) and its weights are not in the repo; `get_detector()` also hard-coded `device="cuda"`, and `detect()` unpacked the wrong return value (`mask, groups, _`). Every failure was swallowed by a broad `except` | vendor the repo at a pinned commit + fetch the weights; install `pyclipper`/`shapely`/`torchsummary`; make the training-only `wandb` import optional; pick the device from `torch.cuda.is_available()`; use the real return value `(mask, mask_refined, block_list)`; assert the detector in the build smoke test |
 
 ## C. Controller logic
 
@@ -38,6 +40,7 @@ from other documents.
 | D1 | two machines billed at once | two controller processes were running (an earlier one had not exited) | destroy leftovers before starting; ensure only one controller runs |
 | C1 | a baked image booted but its services never started | a cloud SSH instance runs its **own entrypoint** (sshd), so the image's `CMD` is **not executed** | pass an `--onstart-cmd` that runs the baked start script (do not rely on the image `CMD`) |
 | C2 | good machines rejected because the model download was slow | the boot flow pulled the model from HuggingFace, which throttles datacenter IPs (measured ~4 MB/s) | **bake the model into the image**; readiness no longer depends on HF |
+| C3 | healthy machines were destroyed during boot | the image-pull watcher treated "no status change for 4 minutes" as a stall, but a 9 GB layer (and the unpack phase after it) changes no status for minutes | only give up on a pull that is repeatedly **retrying**, and allow a generous total timeout |
 
 ## D. Quality
 
