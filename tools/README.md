@@ -7,7 +7,8 @@ secrets. Each one exists because a mistake made it necessary ??see
 
 | Tool | Run it | Why it exists |
 |---|---|---|
-| `pull_watch.py` | `python tools/pull_watch.py --instance <id> --tag <tag> [--destroy]` | **As soon as an instance exists.** Measures the REAL pull rate (manifest layer sizes vs completed layers) and gives up early on a host that keeps retrying or stops progressing. The advertised bandwidth filter is not evidence: a host was kept 35 minutes ($0.125) before its pull was called bad, because a 12 GB layer downloads for ~10 minutes with **no status change**, so "slow" looks exactly like "stuck". |
+| **`rent_and_run.py`** | `python tools/rent_and_run.py --yes --image <repo>:<tag> --tag <tag> --run <pages>...` | **The whole flow in one command** (recommended entry point): rent one machine → measure its pull with `pull_watch.py` → gate → run the volumes → verify → tear down. It is the glue that used to exist only in the author's scratch directory, which meant a fresh clone could not run the flow unattended. |
+| `pull_watch.py` | `python tools/pull_watch.py --instance <id> --tag <tag> [--destroy]` | **As soon as an instance exists.** Measures the REAL pull rate (manifest layer sizes vs completed layers) and gives up early on a host that keeps retrying or whose projected ETA is too long. The advertised bandwidth filter is not evidence: a host was kept 35 minutes ($0.125) before its pull was called bad, because a 12 GB layer downloads for ~10 minutes with **no status change**, so "slow" looks exactly like "stuck". |
 | `gate.py` | `python tools/gate.py --config config.json` | **Before any batch.** Proves the model can actually translate (3 lines in, exactly 3 non-empty Chinese lines out, no ` thinking`/template noise) and that the OCR detector loaded. Skipping this once meant starting a batch with a model that could not translate. |
 | `verify_batch.py` | `python tools/verify_batch.py --dir <folder>` | **Before delivering.** Pairs each input archive with its `_MTL_zhTW` output **by name** (page counts collide) and checks page count, page order, image dimensions and translation coverage. |
 | `audit_detection.py` | `python tools/audit_detection.py --dir <folder>` | **Before claiming a quality improvement.** Compares every *input* page with its *delivered* page by text-stroke density. If the delivered page looks the same as the source, nothing was erased there - that is how 74 of 1034 delivered pages were found to still contain untranslated text. Needs only numpy + opencv, no GPU, no money. |
@@ -26,20 +27,20 @@ python deploy/test_detection.py                 # detection geometry + adaptive 
 # 1) confirm the image tag exists (never rent for an unpublished tag)
 #    https://hub.docker.com/v2/repositories/<repo>/tags/<tag>   -> 200
 
-# 2) rent ONE machine, PROVE its pull is fast enough, then gate it
-python hanhua.py vast up --yes --image <repo>:<tag> --baked --max-price 0.20 --write-config config.json
-#    then, immediately: measure the pull and drop a bad host early
-#    python tools/pull_watch.py --instance <id> --tag <tag> --destroy
-python tools/gate.py --config config.json
+# 2) the whole remote flow, in one command:
+#    rent one machine -> measure its pull -> gate -> run -> verify -> tear down
+python tools/rent_and_run.py --yes --image <repo>:<tag> --tag <tag> `
+       --config config.json --dir . --run 250 237
 
-# 3) run the volumes (verifies each, tears down on success)
-python tools/run_batch.py --config config.json --run 250 237
-
-# 4) audit and deliver
+# 3) audit and deliver (also done automatically by run_batch, but re-runnable)
 python tools/verify_batch.py --dir <folder>
 python tools/audit_detection.py --dir <folder>
 python tools/audit_sheets.py --dir <folder>     # optional, for human review
+python tools/collect.py --dir <folder> --dest ComicsZHTW
 ```
+
+`rent_and_run.py` refuses to rent without `--yes`, and refuses to rent while an
+instance is already recorded in `vast_current.txt` (one machine at a time).
 
 ## Notes
 

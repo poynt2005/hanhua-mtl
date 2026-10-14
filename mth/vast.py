@@ -462,7 +462,12 @@ def up(key, workdir, deploy_dir, model=DEFAULT_MODEL, min_vram=24, min_down=200,
         tried += 1
         try:
             log("instance %s created; waiting for running..." % iid)
-            info = wait_running(key, iid, log=log)
+            # A large image (18+ GB) can legitimately take 20-30 minutes on a
+            # ~15 MB/s host, and the biggest layer downloads with NO status
+            # change - so the cap has to be generous. It only gives up early on a
+            # pull that is repeatedly RETRYING. Prefer tools/rent_and_run.py,
+            # which measures the rate and switches host properly.
+            info = wait_running(key, iid, timeout=2400, log=log)
             if info.get("actual_status") != "running":
                 destroy(key, iid)
                 failed_hosts.add(host_ip)

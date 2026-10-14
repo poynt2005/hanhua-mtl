@@ -21,7 +21,7 @@
 | Cost-safety docs | `deploy/VASTAI_PLAYBOOK.md` (rules + pitfall table), `13_operating_manual.md` (the runbook), `skills/vastai-cost-safety/` |
 | Term consistency | implemented (extract / review / translate / normalize / verify) |
 | Deliverables | **6 volumes, 1034 pages** delivered to `ComicsZHTW/` (647 MB) with `MANIFEST.txt` and per-volume `.project.json`; all verified (page count, order, dimensions, 100% coverage). Archives are **gitignored** (never committed) |
-| Repo tools | `tools/`: `gate.py`, `pull_watch.py`, `verify_batch.py`, `run_batch.py`, `audit_detection.py`, `audit_sheets.py`, `collect.py` (+ `deploy/test_detection.py` unit tests) |
+| Repo tools | `tools/`: **`rent_and_run.py`** (the whole flow: rent → measure the pull → gate → run → verify → tear down), `gate.py`, `pull_watch.py`, `verify_batch.py`, `run_batch.py`, `audit_detection.py`, `audit_sheets.py`, `collect.py` (+ `deploy/test_detection.py` unit tests, `deploy/vast_watchdog.py`) |
 | Machines | **0 running**; the whole session cost **$0.974** |
 
 ## Verified batch run (the one that proves the whole flow)

@@ -77,22 +77,25 @@ $env:VAST_API_KEY = "<key>"          # env only, never a file
 python hanhua.py selftest
 python hanhua.py auto -i sample.zip --ocr mock      # validates packing
 
-# 2) rent ONE machine (refuses if one of ours is already running)
-python hanhua.py vast up --yes --image poynt2005/hanhua-gpu:<tag> --baked `
-       --attempts 4 --max-price 0.20 --write-config config.json
-#    prefer hosts that already hold the image:
-#    $env:PREFER_HOSTS = "154.64.230.50"
+# 2) the whole remote flow in one command: rent ONE machine -> measure its pull
+#    (a bad host is destroyed + blacklisted automatically) -> gate -> run the
+#    volumes -> verify each -> tear the machine down
+python tools/rent_and_run.py --yes --image poynt2005/hanhua-gpu:<tag> --tag <tag> `
+       --config config.json --dir . --run 250 237
 
-# 3) gate: the LLM must answer one sentence
-python hanhua.py ping --profile sakura --config config.json
-
-# 4) run the batch (chain several volumes, verify each, then tear down)
-python _chain_run.py <wait-pages> <run-pages> ...
-#    env: CHAIN_DESTROY=1 to force teardown even if KEEP_MACHINE exists
-
-# 5) verify and tear down
-python _verify.py <pages>            # page count, order, dimensions, translation coverage
+# 3) verify and deliver
+python tools/verify_batch.py --dir .            # page count, order, dimensions, coverage
+python tools/audit_sheets.py --dir .            # contact sheets for a human to glance at
+python tools/collect.py --dir . --dest ComicsZHTW
 ```
+
+`rent_and_run.py` refuses to rent without `--yes` and refuses to rent while one
+machine is already recorded in `vast_current.txt`. If you prefer to drive the
+steps yourself, the equivalents are `hanhua.py vast up --baked` (rent) →
+`tools/pull_watch.py` (measure the pull) → `tools/gate.py` (prove the model
+works) → `tools/run_batch.py` (run + verify + tear down). **Never skip
+`pull_watch`**: the advertised bandwidth filter is not evidence, and a slow host
+cannot be told from a stuck one by the status message.
 
 During a run, keep a watchdog alive so a second machine can never start:
 

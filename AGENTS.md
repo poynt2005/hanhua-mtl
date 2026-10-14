@@ -248,9 +248,17 @@ When the user gives you `api_base` / `ocr_url`, put them in `config.json` and us
 ## 9. One-line summary
 
 ```
-1) ping the endpoint
-2) auto --ocr mock (dry run, validates packing)
-3) auto --ocr http --profile sakura (real run)
-4) verify page count/order, spot-check pages
-5) report: output path + .project.json + "machine translation, not reviewed"
+1) selftest + auto --ocr mock           (free, local: validates packing)
+2) tools/rent_and_run.py --yes --image <tag> --tag <tag> --run <pages>...
+                                        (rent one machine, MEASURE its pull,
+                                         gate, run, verify, tear down)
+3) tools/verify_batch.py --dir .        (page count/order/dimensions/coverage)
+4) tools/audit_sheets.py --dir .        (contact sheets: a human should glance)
+5) tools/collect.py --dir . --dest ComicsZHTW
+6) report: money first, output paths, and "machine translation, not reviewed"
 ```
+
+`rent_and_run.py` is the entry point; it never leaves a machine behind and it
+refuses to rent while one is already recorded. Read
+`llm_handoff/13_operating_manual.md` (runbook) and
+`llm_handoff/14_thrashing_postmortem.md` (how not to waste money) first.
