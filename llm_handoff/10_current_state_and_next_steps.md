@@ -11,7 +11,7 @@
 | GPU image (`deploy/Dockerfile`) | **v0.5.0** (~18.7 GB): every model weight baked into fixed cache paths, runtime forced offline, comic-text-detector vendored at a pinned commit, **Sakura-14B-Qwen3-v1.5 at Q6_K** (imported from its GGUF via a Modelfile, 12.12 GB), **16384-token context**, **adaptive multi-variant detection**, build smoke test that blocks all outbound sockets |
 | Translation model | `sakura-qwen3-q6k`: the newest 14B Sakura (Qwen3 base, 2026-01) at Q6_K, with **that release's own recommended system prompt** (the Qwen3 line is tuned with different wording from the older GalTransl one) |
 | Detection | plain pass first; **escalates** to rotated (vertical text) and inverted (white-on-dark) passes only when it finds < 5 boxes; `DET_SIZE` 1280; rotated boxes mapped back and deduped by IoU. All knobs env-overridable |
-| Pre-flight gate | `_gate.py`: translates 3 lines and requires exactly 3 non-empty Chinese lines with **no reasoning/template noise**, plus OCR detector health. Run it before every batch |
+| Pre-flight gate | `tools/gate.py`: translates 3 lines and requires exactly 3 non-empty Chinese lines with **no reasoning/template noise**, plus OCR detector health. Run it before every batch |
 | Unit tests (free, no torch) | `deploy/test_detection.py`: rotation mappings against numpy ground truth, dedup, and the adaptive escalation flow with a fake detector |
 | Quality audit (free, no GPU) | compare each **input** page with its **delivered** page by text-stroke density; this is what produced the 74-page finding below |
 | vast.ai controller (`mth/vast.py`) | **single-instance invariant** (`up` refuses while one of ours is running/loading), recorded owner (`vast_current.txt`), `enforce_single()`, refusal reasons surfaced |
@@ -137,10 +137,11 @@ the contact sheets and have a human look before changing code.**
 
 ### P1 — hardening
 - Pin the base image by digest.
-- Add a `--strict` end-to-end gate that refuses to deliver unless `verify` passes
-  (page count, order, dimensions, coverage).
-- Move the useful helper scripts into `tools/` (parameterised): `_gate.py`,
-  `_verify_all.py`, `_audit_compare.py`, `_ocr_audit.py`, `_chain_run.py`.
+- Add a `--strict` end-to-end gate that refuses to deliver unless verification
+  passes (page count, order, dimensions, coverage).
+- ~~Move the useful helper scripts into `tools/`.~~ **Done** - all of them are in
+  `tools/` now (`rent_and_run.py`, `gate.py`, `pull_watch.py`, `verify_batch.py`,
+  `run_batch.py`, `audit_detection.py`, `audit_sheets.py`, `collect.py`).
 
 ### P2 — nice to have
 - Consider `PaddleOCR-VL-For-Manga` (Apache-2.0, 70% full-sentence accuracy on
@@ -158,8 +159,8 @@ the contact sheets and have a human look before changing code.**
 - Never write ad-hoc rental code (see `deploy/VASTAI_PLAYBOOK.md` R7).
 - **Never rent for an image tag that is not published yet** (V64) - check the
   registry first.
-- Run `_gate.py` before any batch; audit with `_audit_compare.py` before claiming
-  a quality improvement.
+- Run `tools/gate.py` before any batch; audit with `tools/audit_detection.py`
+  (and glance at `tools/audit_sheets.py`) before claiming a quality improvement.
 
 ## If you are picking this up
 
@@ -167,9 +168,11 @@ the contact sheets and have a human look before changing code.**
    `14_thrashing_postmortem.md` (it will save you money), then `01`→`12`.
 2. Run `selftest` and `auto --ocr mock` locally (free), and
    `python deploy/test_detection.py`.
-3. Confirm the image tag exists on the registry, rent one machine with
-   `hanhua.py vast up --baked`, run `_gate.py`, then the batch through
-   `_chain_run.py` (it verifies each volume and tears down on success).
-4. Audit the delivered pages with `_audit_compare.py`; do not claim quality from
-   impressions.
-5. Ask the user to review the output before spending more on machines.
+3. Confirm the image tag exists on the registry, then run the whole remote flow
+   with `tools/rent_and_run.py --yes --image <tag> --tag <tag> --run <pages>...`
+   (it rents one machine, measures its pull, gates it, runs the volumes, verifies
+   each and tears the machine down).
+4. Audit the delivered pages with `tools/verify_batch.py` and
+   `tools/audit_detection.py`; do not claim quality from impressions.
+5. Collect the delivery with `tools/collect.py --dest ComicsZHTW`.
+6. Ask the user to review the output before spending more on machines.

@@ -35,9 +35,9 @@ agent needs to continue seamlessly from the current state.
 | `AGENTS.md` | operating instructions for AI agents |
 | `deploy/VASTAI_PLAYBOOK.md` | hard rules + pitfall table for GPU rental (read this first if you touch vast.ai) |
 | `llm_handoff/13_operating_manual.md` | the verified runbook + measured cost model |
-| `deploy/CODE_REVIEW.md` | review findings (mirror of doc 7) |
 | `deploy/Dockerfile` | the prebuilt GPU image |
 | `deploy/vast_watchdog.py` | enforces "one machine at a time" while a run is in flight |
+| `tools/README.md` | the operational scripts (rent/measure/gate/run/verify/audit/collect) |
 | `skills/vastai-cost-safety/` | portable cost-safety skill |
 
 ## TL;DR of the current state

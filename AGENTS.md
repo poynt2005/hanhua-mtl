@@ -224,8 +224,9 @@ When the user gives you `api_base` / `ocr_url`, put them in `config.json` and us
   switch machines — do not debug a bad host.
 - Three gates before a batch: `/v1/models` returns a model → single-sentence test
   200 → no stale process.
-- Judge success by **content** (non-empty output) and by `_verify.py` (page
-  count, page order, image dimensions, translation coverage), not line counts.
+- Judge success by **content** (non-empty output) and by `tools/verify_batch.py`
+  (page count, page order, image dimensions, translation coverage), not line
+  counts.
 - Never `scp` model weights or big wheels to the remote; download on the remote.
 - Before destroying, pull artifacts back and verify; after destroying, confirm
   `show instances` is empty.

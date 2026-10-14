@@ -157,7 +157,8 @@ image dimensions unchanged
 translation coverage: every block with source text has a non-empty translation
 ```
 
-`_verify.py <pages>` prints all of this. A non-zero exit means do not deliver.
+`tools/verify_batch.py --dir .` prints all of this. A non-zero exit means do not
+deliver.
 
 Measured example (all five volumes passed):
 
