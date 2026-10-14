@@ -16,8 +16,10 @@ export OLLAMA_HOST="0.0.0.0:8000"
 export OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}"
 export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}"
 
-SAKURA_MODEL="${SAKURA_MODEL:-hf.co/SakuraLLM/Sakura-GalTransl-14B-v3.8:Q4_K_M}"
-MODEL_URL="https://huggingface.co/SakuraLLM/Sakura-GalTransl-14B-v3.8/resolve/main/Sakura-Galtransl-14B-v3.8.gguf"
+SAKURA_MODEL="${SAKURA_MODEL:-sakura-q6k}"
+# The unsuffixed GGUF is Q6_K (see deploy/Dockerfile). We import it with a
+# Modelfile rather than `ollama pull :Q6_K`, which cannot resolve.
+MODEL_URL="${SAKURA_MODEL_URL:-https://huggingface.co/SakuraLLM/Sakura-GalTransl-14B-v3.8/resolve/main/Sakura-Galtransl-14B-v3.8.gguf}"
 
 # OCR service first, so /health is reachable while everything else is starting.
 # It runs under a restart loop: a single bad page must not take the whole service
@@ -39,18 +41,21 @@ sleep 8
 # /health exposes hf_mbps for information only (readiness never gates on it).
 echo 0 > /root/hf_mbps.txt
 
-if OLLAMA_HOST=127.0.0.1:8000 ollama list 2>/dev/null | grep -qi "sakura"; then
-  echo "sakura model already present (baked); skipping HF probe and pull"
+if OLLAMA_HOST=127.0.0.1:8000 ollama list 2>/dev/null | grep -qi "${SAKURA_MODEL%%:*}"; then
+  echo "model ${SAKURA_MODEL} already present (baked); skipping HF probe and download"
 else
   # Fallback (image built with BAKE_SAKURA=0): measure HF throughput and only
-  # pull when it is fast enough, otherwise let the controller fail fast and
+  # download when it is fast enough, otherwise let the controller fail fast and
   # switch machines instead of stalling on a bad-network host.
   HF=$(curl -sL -r 0-52428799 -m 25 -o /dev/null -w '%{speed_download}' "$MODEL_URL" 2>/dev/null || echo 0)
   HF=${HF:-0}
   echo "$(( ${HF%%.*} / 1048576 ))" > /root/hf_mbps.txt
   echo "HF_MBPS=$(cat /root/hf_mbps.txt)"
   if [ "$(cat /root/hf_mbps.txt)" -ge 8 ]; then
-    OLLAMA_HOST=127.0.0.1:8000 ollama pull "$SAKURA_MODEL" || echo "PULL_FAIL"
+    curl -fL --retry 5 -o "/root/${SAKURA_MODEL}.gguf" "$MODEL_URL" \
+      && printf 'FROM /root/%s.gguf\n' "$SAKURA_MODEL" > /root/Modelfile \
+      && OLLAMA_HOST=127.0.0.1:8000 ollama create "$SAKURA_MODEL" -f /root/Modelfile \
+      && rm -f "/root/${SAKURA_MODEL}.gguf" || echo "PULL_FAIL"
   else
     echo "SKIP_PULL_SLOW_HF"
   fi

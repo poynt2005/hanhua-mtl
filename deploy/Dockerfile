@@ -14,6 +14,7 @@
 #   easyocr ja          -> $EASYOCR_MODULE_PATH            (GitHub releases)
 #   LaMa big-lama.pt    -> $TORCH_HOME/hub/checkpoints     (GitHub release)
 #   comic-text-detector -> /opt/comic-text-detector/data/  (GitHub release)
+#   Sakura 14B          -> ollama, imported from the Q6_K GGUF (see the bake step)
 # The runtime therefore loads every model with ZERO network calls, even on hosts
 # that cannot reach HuggingFace — and the build smoke test proves it by blocking
 # every outbound connection.
@@ -29,7 +30,12 @@
 ARG BASE=pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
 FROM ${BASE}
 
-ARG SAKURA_MODEL=hf.co/SakuraLLM/Sakura-GalTransl-14B-v3.8:Q4_K_M
+ARG SAKURA_MODEL=sakura-q6k
+# Q6_K: the file WITHOUT a quant suffix is Q6_K (the SakuraLLM authors' own
+# deployment tutorial uses exactly this file). Measured quality: llama.cpp lists
+# Q6_K at +0.0044 perplexity vs +0.0535 for Q4_K_M. It needs ~16 GB VRAM, so it
+# still fits a 24 GB card - the only cost is ~25% slower generation.
+ARG SAKURA_MODEL_URL=https://huggingface.co/SakuraLLM/Sakura-GalTransl-14B-v3.8/resolve/main/Sakura-Galtransl-14B-v3.8.gguf
 ARG BAKE_SAKURA=0
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -189,10 +195,21 @@ urllib.request.urlretrieve(url, dst)
 print("baked comic-text-detector weights %s (%d MB)" % (dst, os.path.getsize(dst) // 1048576))
 PY
 
-# --- optionally bake the Sakura GGUF (removes the boot-time 9 GB pull) --------
+# --- bake the Sakura GGUF (Q6_K) ---------------------------------------------
+# `ollama pull hf.co/SakuraLLM/Sakura-GalTransl-14B-v3.8:Q6_K` CANNOT work: the
+# repo has no file whose name contains "Q6_K" (the unsuffixed file IS Q6_K).
+# So download the file and import it with a Modelfile - deterministic, and the
+# same thing the upstream deployment guide does. The GGUF carries its own chat
+# template, so ollama uses the correct one automatically.
 RUN if [ "${BAKE_SAKURA}" = "1" ]; then \
-        (nohup ollama serve >/tmp/ollama.log 2>&1 &) && sleep 6 \
-        && OLLAMA_HOST=127.0.0.1:11434 ollama pull "${SAKURA_MODEL}" \
+        curl -fL --retry 5 --retry-delay 5 -o "/root/${SAKURA_MODEL}.gguf" "${SAKURA_MODEL_URL}" \
+        && ls -l "/root/${SAKURA_MODEL}.gguf" \
+        && (nohup ollama serve >/tmp/ollama.log 2>&1 &) && sleep 6 \
+        && printf 'FROM /root/%s.gguf\n' "${SAKURA_MODEL}" > /root/Modelfile \
+        && OLLAMA_HOST=127.0.0.1:11434 ollama create "${SAKURA_MODEL}" -f /root/Modelfile \
+        && OLLAMA_HOST=127.0.0.1:11434 ollama list \
+        && OLLAMA_HOST=127.0.0.1:11434 ollama show "${SAKURA_MODEL}" | head -n 20 \
+        && rm -f "/root/${SAKURA_MODEL}.gguf" \
         && pkill ollama || echo "[warn] sakura bake failed"; \
     else echo "skipping Sakura bake (BAKE_SAKURA=0)"; fi
 

@@ -24,6 +24,7 @@ agent needs to continue seamlessly from the current state.
 | 11 | `11_lessons_and_guardrails.md` | distilled cost-safety rules |
 | 12 | `12_hf_network_audit.md` | every function that can reach the network, and every HuggingFace touchpoint |
 | 13 | `13_operating_manual.md` | **the runbook**: measured cost model, the exact procedure, what made it work, verification, and a failure-lookup table |
+| 14 | `14_thrashing_postmortem.md` | **read before changing anything**: how this project repeatedly broke its own fixes, every regression, the anti-patterns, and the loop that works instead |
 
 ## Related documents (kept in place, not duplicated here)
 

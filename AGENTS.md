@@ -235,6 +235,13 @@ When the user gives you `api_base` / `ocr_url`, put them in `config.json` and us
 > (~15 s/page). See `llm_handoff/13_operating_manual.md` for the runbook and
 > `deploy/VASTAI_PLAYBOOK.md` for the pitfall table (V43-V57 are this project's
 > own, paid for in real money).
+>
+> ⚠️ **Before you change anything, read `llm_handoff/14_thrashing_postmortem.md`.**
+> It documents how this project repeatedly broke its own fixes by guessing the
+> cause and testing on a paid machine, destroying the machine that held the
+> evidence, and editing controllers without re-checking their call sites. Every
+> dollar of waste came from that loop. The rule is: **reproduce for free,
+> instrument, change ONE thing, verify in isolation, and only then spend.**
 
 ---
 
