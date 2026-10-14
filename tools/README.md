@@ -12,7 +12,8 @@ secrets. Each one exists because a mistake made it necessary ??see
 | `verify_batch.py` | `python tools/verify_batch.py --dir <folder>` | **Before delivering.** Pairs each input archive with its `_MTL_zhTW` output **by name** (page counts collide) and checks page count, page order, image dimensions and translation coverage. |
 | `audit_detection.py` | `python tools/audit_detection.py --dir <folder>` | **Before claiming a quality improvement.** Compares every *input* page with its *delivered* page by text-stroke density. If the delivered page looks the same as the source, nothing was erased there - that is how 74 of 1034 delivered pages were found to still contain untranslated text. Needs only numpy + opencv, no GPU, no money. |
 | `run_batch.py` | `python tools/run_batch.py --config config.json --run 250 237` | Runs volumes sequentially on an already-rented machine, verifies each, and **destroys the machine only when everything verified**. Keeps the machine on failure (it is the debugging environment). |
-| `audit_sheets.py` | `python tools/audit_sheets.py --dir <folder>` | Builds a contact sheet of the low-block pages **from the delivered archives** so a human can eyeball which pages still show the source language. |
+| `audit_sheets.py` | `python tools/audit_sheets.py --dir <folder>` | Builds a contact sheet of the low-block pages **from the delivered archives** so a human can eyeball which pages still show the source language. **Do this before acting on the audit number** - it is how the "74 pages" over-call was discovered (they were almost all SFX, which this pipeline keeps on purpose). |
+| `collect.py` | `python tools/collect.py --dir . --dest ComicsZHTW` | Collects the delivered archives into one folder, **verifying page count and order before moving each one**, and writes `MANIFEST.txt`. Nothing unverified can end up in the delivery folder. |
 
 ## Typical sequence
 

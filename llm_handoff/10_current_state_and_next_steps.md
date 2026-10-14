@@ -20,7 +20,9 @@
 | OCR client | retries `/prepare` and names the failing endpoint |
 | Cost-safety docs | `deploy/VASTAI_PLAYBOOK.md` (rules + pitfall table), `13_operating_manual.md` (the runbook), `skills/vastai-cost-safety/` |
 | Term consistency | implemented (extract / review / translate / normalize / verify) |
-| Deliverables | produced; **gitignored** (never committed) |
+| Deliverables | **6 volumes, 1034 pages** delivered to `ComicsZHTW/` (647 MB) with `MANIFEST.txt` and per-volume `.project.json`; all verified (page count, order, dimensions, 100% coverage). Archives are **gitignored** (never committed) |
+| Repo tools | `tools/`: `gate.py`, `pull_watch.py`, `verify_batch.py`, `run_batch.py`, `audit_detection.py`, `audit_sheets.py`, `collect.py` (+ `deploy/test_detection.py` unit tests) |
+| Machines | **0 running**; the whole session cost **$0.974** |
 
 ## Verified batch run (the one that proves the whole flow)
 
@@ -41,6 +43,13 @@ Measured throughput: **~15 s/page** (OCR ~6.9 s + translation ~8.3 s), i.e. a
 
 Each volume was verified for: page count, page order, image dimensions, and
 translation coverage (every block with source text has a non-empty translation).
+
+**Model versions in the delivery** (important): the batch above used the older
+`GalTransl-14B-v3.8` at Q4_K_M with an 8192 context. Only the 250-page Jinzou
+volume was later **re-run on `v0.5.0`** (Sakura-14B-**Qwen3**-v1.5 at Q6_K, 16384
+context, its own recommended prompt): 3794/3794 blocks, verified, 12.9 s/page.
+The other five volumes still carry the older model's output; re-running them on
+v0.5.0 costs ~$0.60 (see `15_run_log.md` §9).
 
 ## What actually fixed the batch failures (in order of impact)
 
@@ -68,37 +77,38 @@ translation coverage (every block with source text has a non-empty translation).
    detector passes when the plain pass finds suspiciously little text, at
    `DET_SIZE` 1280. See G16 and `13_operating_manual.md` item 10.
 
-## Detection quality: the measured gap and the fix
+## Detection quality: what the audit found, and the correction
 
-The first delivered batch looked fine by the usual checks (page count, order,
-dimensions, 100% of *detected* blocks translated) but was **not** complete: a
-single detector pass had silently missed whole regions, so those pages kept
-their original Japanese.
+All delivered pages passed the usual checks (page count, order, dimensions,
+100% of *detected* blocks translated) - but those say nothing about text that was
+never detected, so a free audit was written: compare the **text-stroke density**
+of each input page with its delivered page (no GPU, no viewing, no money).
 
-How it was found (free - no GPU, no viewing, no money): for every page, measure
-the **text-stroke density** (Otsu dark ratio + count of text-stroke-sized
-connected components) of the *input* page and of the *delivered* page. If the
-delivered page still has the same density, nothing was erased there.
+First result: **74 of 1034 pages still looked text-like and unchanged**, ~32 with
+thousands of strokes, and one volume had 20 consecutive such pages. It looked like
+a major defect, so an adaptive multi-variant detector was built and shipped
+(`v0.5.0`), and the 250-page volume was re-run to measure it:
 
-| Measure | Result |
-|---|---|
-| Pages with ≤2 detected blocks (all 6 volumes) | 87 |
-| Of those, delivered page unchanged AND still text-like | **74** |
-| Of those, with >2000 strokes (near-certain text pages) | **~32** |
-| Worst case | `Tokushu` pages **201-220** - 20 consecutive pages, all missed |
-| Pages that were genuinely blank/credits (my earlier over-count) | ~13 |
+| Metric | Before (single pass) | After (adaptive) |
+|---|---|---|
+| blocks | 3745 | 3794 (+49) |
+| pages with <=2 blocks | 30 | 29 |
+| of those, still text-like | 23 | 23 |
 
-Fix (v0.5.0): the plain pass runs first; if it finds fewer than
-`DET_ESCALATE_BELOW` (5) boxes, the server also runs **rot90 / rot270** (vertical
-lines become horizontal - the same idea as manga-image-translator's
-`det_auto_rotate`) and **invert** (white-on-dark) passes, maps the boxes back to
-the original coordinates (unit-tested) and dedups by IoU. Cost is low because
-most pages never escalate.
+**The fix did not move the metric - and it is not claimed as a fix.**
 
-**This is not yet re-measured on a full volume.** The v0.5.0 pilot translates the
-same 250-page volume whose "before" numbers are known (30 low-block pages, 23 of
-them still carrying text) and re-runs the same audit, so the improvement is a
-number, not an impression.
+Then the user looked at the contact sheets: **the flagged pages are almost
+entirely onomatopoeia / sound effects**, and this pipeline sets
+`keep_sfx: true`, i.e. keeping SFX is intended.
+
+So the audit **over-called**: the stroke metric cannot tell dialogue from SFX.
+`tools/audit_detection.py` now says so in its docstring and output, and
+`14_thrashing_postmortem.md` / `15_run_log.md` record it as a wasted chase. The
+adaptive detection was kept (harmless, +49 blocks) but the honest position is
+that **detection was not broken**.
+
+**Lesson: an automated quality metric is a triage list, not a defect count. Build
+the contact sheets and have a human look before changing code.**
 
 ## Known issues / open items
 
