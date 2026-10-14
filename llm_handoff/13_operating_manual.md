@@ -21,27 +21,48 @@ This is the runbook that actually worked (5 volumes, ~1,850 pages, one machine,
 Rule of thumb: **a 250-page volume costs about 15 cents.** Anything much above
 that means something is wrong (idle time, a slow host, or a stall).
 
-Quantisation trade-off (measured file sizes, projected cost). **The image ships
-Q6_K** (`sakura-q6k`), chosen on community evidence: llama.cpp's perplexity table
-(Q4_K_M **+0.0535**, Q5_K_S +0.0353, Q6_K **+0.0044**), the VRAM-headroom rule
-("model under 60% of VRAM → use Q6_K"), and the fact that **SakuraLLM's own
-deployment tutorial downloads the Q6_K file**.
+Quantisation and model choice. **The image ships `sakura-qwen3-q6k`**: the
+Sakura-14B-**Qwen3**-v1.5 release at **Q6_K** (12.12 GB), imported from its GGUF
+with a Modelfile, running with a **16384-token context**.
+
+Why this exact combination (all evidence-based):
+
+- **Q6_K over Q4_K_M**: llama.cpp's perplexity table gives Q6_K **+0.0044** vs
+  Q4_K_M **+0.0535**; r/LocalLLaMA calls Q6_K "almost identical to f16"; and the
+  VRAM-headroom rule says "model under 60% of VRAM → use Q6_K". Q6_K needs
+  ~16 GB, so it still fits a 24 GB card - the only cost is ~25% slower generation.
+- **The Qwen3 base over GalTransl-v3.8**: same 14B size, same Q6_K size, same
+  VRAM/speed class, newer base (released 2026-01).
+- **16384 context** (up from 8192): Sakura's own guide runs 32768; 16k keeps the
+  KV cache within a 24 GB card while giving the translator far more context for
+  cross-page consistency.
 
 | Quant | GGUF | VRAM needed | GPU class | Cost / 250-page volume | Note |
 |---|---|---|---|---|---|
 | IQ4_XS | 8.19 GB | ~12 GB | 24 GB | ~$0.13 | smallest, marginal vs Q4_K_M |
-| Q4_K_M | 8.99 GB | ~13 GB | 24 GB | ~$0.14 | the old default; quality was judged unsatisfactory |
+| Q4_K_M | 8.99 GB | ~13 GB | 24 GB | ~$0.14 | the old default; quality judged unsatisfactory |
 | Q5_K_S | 10.27 GB | ~14 GB | 24 GB | ~$0.15 | community calls the `_S` mix weak |
-| **Q6_K (current)** | **12.12 GB** | **~16 GB** | **24 GB** | **~$0.18** | "almost identical to f16"; what the authors deploy |
+| **Q6_K (current)** | **12.12 GB** | **~16 GB** | **24 GB** | **~$0.18** | "almost identical to f16" |
 | bf16 (not published) | ~28 GB | ~33 GB | 40–80 GB | ~$0.60–0.85 | 4–6× the cost for a small gain |
 
-Two implementation traps, both paid for:
+Three implementation traps, all paid for:
 
-1. **`ollama pull hf.co/SakuraLLM/Sakura-GalTransl-14B-v3.8:Q6_K` fails** - no file
-   in that repo contains the string `Q6_K`. The *unsuffixed* GGUF is Q6_K. Import
-   it with a Modelfile (`FROM /root/<name>.gguf` + `ollama create <name>`).
-2. Importing the file requires **~2× its size in free disk** during the build (the
+1. **`ollama pull ...:Q6_K` cannot resolve** for these repos - the quant tag only
+   matches when a *filename* contains it (for GalTransl the unsuffixed GGUF was
+   Q6_K; for the Qwen3 release the file is `...-q6k.gguf`). Import the GGUF with
+   a Modelfile (`FROM /root/<name>.gguf` + `ollama create <name>`) instead of
+   guessing tags.
+2. Importing the file needs **~2× its size in free disk** during the build (the
    GGUF plus the ollama blob), so `rm` the GGUF in the same layer.
+3. **A new model version usually needs a new system prompt.** The Qwen3 release
+   recommends different wording from the GalTransl line; shipping the model with
+   the old prompt is a silent quality regression. Copy the prompt from the model
+   card into `mth/providers.py`.
+
+Before any batch, run the pre-flight gate: it translates three lines and requires
+exactly three non-empty Chinese lines with **no reasoning/template noise**
+(` thinking`, `<|im_start|>`, …) - which is what a wrong chat template or a
+reasoning model would produce.
 
 ---
 
