@@ -1,12 +1,13 @@
-# tools/ — operational scripts that paid for themselves
+# tools/ ??operational scripts that paid for themselves
 
 These are the scripts that were actually used to run, verify and audit a batch.
 They are deliberately small and parameterised: no hard-coded user paths, no
-secrets. Each one exists because a mistake made it necessary — see
+secrets. Each one exists because a mistake made it necessary ??see
 `llm_handoff/14_thrashing_postmortem.md`.
 
 | Tool | Run it | Why it exists |
 |---|---|---|
+| `pull_watch.py` | `python tools/pull_watch.py --instance <id> --tag <tag> [--destroy]` | **As soon as an instance exists.** Measures the REAL pull rate (manifest layer sizes vs completed layers) and gives up early on a host that keeps retrying or stops progressing. The advertised bandwidth filter is not evidence: a host was kept 35 minutes ($0.125) before its pull was called bad, because a 12 GB layer downloads for ~10 minutes with **no status change**, so "slow" looks exactly like "stuck". |
 | `gate.py` | `python tools/gate.py --config config.json` | **Before any batch.** Proves the model can actually translate (3 lines in, exactly 3 non-empty Chinese lines out, no ` thinking`/template noise) and that the OCR detector loaded. Skipping this once meant starting a batch with a model that could not translate. |
 | `verify_batch.py` | `python tools/verify_batch.py --dir <folder>` | **Before delivering.** Pairs each input archive with its `_MTL_zhTW` output **by name** (page counts collide) and checks page count, page order, image dimensions and translation coverage. |
 | `audit_detection.py` | `python tools/audit_detection.py --dir <folder>` | **Before claiming a quality improvement.** Compares every *input* page with its *delivered* page by text-stroke density. If the delivered page looks the same as the source, nothing was erased there - that is how 74 of 1034 delivered pages were found to still contain untranslated text. Needs only numpy + opencv, no GPU, no money. |
@@ -24,8 +25,10 @@ python deploy/test_detection.py                 # detection geometry + adaptive 
 # 1) confirm the image tag exists (never rent for an unpublished tag)
 #    https://hub.docker.com/v2/repositories/<repo>/tags/<tag>   -> 200
 
-# 2) rent ONE machine, then gate it
+# 2) rent ONE machine, PROVE its pull is fast enough, then gate it
 python hanhua.py vast up --yes --image <repo>:<tag> --baked --max-price 0.20 --write-config config.json
+#    then, immediately: measure the pull and drop a bad host early
+#    python tools/pull_watch.py --instance <id> --tag <tag> --destroy
 python tools/gate.py --config config.json
 
 # 3) run the volumes (verifies each, tears down on success)
