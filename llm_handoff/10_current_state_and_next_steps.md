@@ -8,7 +8,7 @@
 | `auto` one-shot command | works; default output `<stem>_MTL_zhTW<ext>` |
 | OCR/inpaint service (`deploy/ocr_server.py`) | works; neural detector mask, LaMa erase, crops back to the original size, per-stage logging, `GET /logs`, restart loop |
 | Local CPU path | works; inpainting limited to lightweight methods (no LaMa without torch) |
-| GPU image (`deploy/Dockerfile`) | **v0.2.3 pushed** (~15.5 GB): every model weight baked into fixed cache paths, runtime forced offline, comic-text-detector vendored at a pinned commit, build smoke test that blocks all outbound sockets |
+| GPU image (`deploy/Dockerfile`) | **v0.3.0 pushed** (~18.7 GB): every model weight baked into fixed cache paths, runtime forced offline, comic-text-detector vendored at a pinned commit, **Sakura 14B at Q6_K** (imported from the unsuffixed GGUF via a Modelfile), build smoke test that blocks all outbound sockets |
 | vast.ai controller (`mth/vast.py`) | **single-instance invariant** (`up` refuses while one of ours is running/loading), recorded owner (`vast_current.txt`), `enforce_single()`, refusal reasons surfaced |
 | Watchdog | `deploy/vast_watchdog.py` destroys any extra instance we own (never the user's) |
 | LLM client | **streams** responses (SSE) and retries transient drops - this was the root cause of every aborted batch |

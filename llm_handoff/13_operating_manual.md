@@ -21,18 +21,27 @@ This is the runbook that actually worked (5 volumes, ~1,850 pages, one machine,
 Rule of thumb: **a 250-page volume costs about 15 cents.** Anything much above
 that means something is wrong (idle time, a slow host, or a stall).
 
-Quantisation trade-off (measured file sizes, projected cost):
+Quantisation trade-off (measured file sizes, projected cost). **The image ships
+Q6_K** (`sakura-q6k`), chosen on community evidence: llama.cpp's perplexity table
+(Q4_K_M **+0.0535**, Q5_K_S +0.0353, Q6_K **+0.0044**), the VRAM-headroom rule
+("model under 60% of VRAM → use Q6_K"), and the fact that **SakuraLLM's own
+deployment tutorial downloads the Q6_K file**.
 
-| Quant | GGUF | VRAM needed | GPU class | Cost / 250-page volume |
-|---|---|---|---|---|
-| IQ4_XS | 8.19 GB | ~12 GB | 24 GB | ~$0.13 |
-| **Q4_K_M (current)** | **8.99 GB** | **~13 GB** | 24 GB | **~$0.14** |
-| Q5_K_S | 10.27 GB | ~14 GB | 24 GB | ~$0.15 |
-| Q6_K (`...v3.8.gguf`) | 12.12 GB | ~16 GB | 24 GB | ~$0.18 |
-| bf16 (not published) | ~28 GB | ~33 GB | 40–80 GB | ~$0.60–0.85 |
+| Quant | GGUF | VRAM needed | GPU class | Cost / 250-page volume | Note |
+|---|---|---|---|---|---|
+| IQ4_XS | 8.19 GB | ~12 GB | 24 GB | ~$0.13 | smallest, marginal vs Q4_K_M |
+| Q4_K_M | 8.99 GB | ~13 GB | 24 GB | ~$0.14 | the old default; quality was judged unsatisfactory |
+| Q5_K_S | 10.27 GB | ~14 GB | 24 GB | ~$0.15 | community calls the `_S` mix weak |
+| **Q6_K (current)** | **12.12 GB** | **~16 GB** | **24 GB** | **~$0.18** | "almost identical to f16"; what the authors deploy |
+| bf16 (not published) | ~28 GB | ~33 GB | 40–80 GB | ~$0.60–0.85 | 4–6× the cost for a small gain |
 
-**Q6_K needs no bigger GPU** — it fits 24 GB — so upgrading costs ~+$0.04/volume.
-Reaching bf16 needs a 4–6× pricier card for a small quality gain; do not.
+Two implementation traps, both paid for:
+
+1. **`ollama pull hf.co/SakuraLLM/Sakura-GalTransl-14B-v3.8:Q6_K` fails** - no file
+   in that repo contains the string `Q6_K`. The *unsuffixed* GGUF is Q6_K. Import
+   it with a Modelfile (`FROM /root/<name>.gguf` + `ollama create <name>`).
+2. Importing the file requires **~2× its size in free disk** during the build (the
+   GGUF plus the ollama blob), so `rm` the GGUF in the same layer.
 
 ---
 

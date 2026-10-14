@@ -98,6 +98,8 @@ Plus two human errors:
 | V55 | the wrong archive was picked for a page-count lookup | two different volumes had 237 pages | identify inputs by page count **and** skip any that already have an output archive |
 | V56 | a failed pilot destroyed the only debugging environment | a `finally: destroy` guard was added to guarantee "nothing left billing" | **keep the machine when a run fails** (that is exactly when it is needed); destroy only when the work is done or the user says so |
 | V57 | a native crash left no explanation at all | the process died with no traceback and the container is not reachable except by SSH | `faulthandler` into a log file, per-stage markers, VRAM in `/health`, a `GET /logs` HTTP endpoint, and a restart loop in the start script |
+| V58 | `ollama pull hf.co/SakuraLLM/Sakura-GalTransl-14B-v3.8:Q6_K` cannot work | **no file in that repo contains the string `Q6_K`** - the *unsuffixed* GGUF is Q6_K (the model card says so), and the quant tag only resolves when a filename matches it | download the unsuffixed GGUF and import it with a Modelfile (`ollama create`); do not guess quant tags - list the repo's files first |
+| V59 | the chosen quantisation was never justified | "Q4_K_M is the default" is a habit, not a measurement | check the community evidence: llama.cpp's perplexity table (Q4_K_M **+0.0535** vs Q5_K_S +0.0353 vs Q6_K **+0.0044**), the VRAM headroom rule ("model under 60% of VRAM → use Q6_K"), and **what the model's own authors deploy** - SakuraLLM's tutorial downloads the Q6_K file |
 
 ---
 

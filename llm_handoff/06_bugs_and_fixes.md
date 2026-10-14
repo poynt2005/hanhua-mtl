@@ -30,6 +30,7 @@ from other documents.
 | G12 | a crashed service gave no explanation at all | the process died with no traceback, stderr was redirected away, and the container is not reachable except by SSH | `faulthandler` into a log file, per-stage log markers, VRAM in `/health`, a `GET /logs` endpoint (readable over HTTP after a crash), and a restart loop in the start script |
 | G13 | a log-based progress counter went DOWN, looking like a stall | every line reached `/root/ocr.log` twice (the server appends to the file **and** the shell redirected the service's stdout into it) | write the log file in exactly one place |
 | G14 | a runner's log stayed 0 bytes for an hour, looking like a crash | the child's output was captured (`capture_output=True`) and printed only after each volume | stream the child's output into the job log |
+| G15 | `ollama pull hf.co/SakuraLLM/Sakura-GalTransl-14B-v3.8:Q6_K` cannot resolve, and the quality of the shipped quant was never justified | no file in that repo contains the string `Q6_K` (the *unsuffixed* GGUF is Q6_K), and the quant was inherited from the "Q4_K_M is the default" habit rather than measured | download the unsuffixed GGUF and `ollama create` from a Modelfile; choose the quant from evidence (llama.cpp perplexity table, the VRAM-headroom rule, and what the model's own authors deploy - SakuraLLM's tutorial uses Q6_K) |
 
 ## C. Controller logic
 
