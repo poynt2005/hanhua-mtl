@@ -22,6 +22,12 @@ DEFAULTS = {
     "keep_sfx": True,
     "convert_tw": True,
     "timeout": 300,
+    # Streaming keeps the socket busy during generation. A non-streaming request
+    # is silent for the whole generation and the GPU host's port forward drops an
+    # idle connection after ~15s (observed: ~1 in 5 requests failed with
+    # RemoteDisconnected / WinError 10054).
+    "stream": True,
+    "retries": 3,
     "pattern": "*.png",
 }
 

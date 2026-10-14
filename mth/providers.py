@@ -1,8 +1,10 @@
 import base64
+import http.client
 import json
 import mimetypes
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 
@@ -57,13 +59,78 @@ def _extract_json(text):
     raise ValueError("no JSON found in response: %s" % text[:300])
 
 
+class _Retryable(RuntimeError):
+    """A transient transport failure worth retrying (connection dropped, reset)."""
+
+
 class OpenAICompat:
-    def __init__(self, base, key, timeout=180):
+    def __init__(self, base, key, timeout=180, stream=True, retries=3):
         if not key:
             raise ProviderError("missing API key (config api_key / MTH_API_KEY)")
         self.base = base.rstrip("/")
         self.key = key
         self.timeout = timeout
+        self.stream = stream
+        self.retries = max(1, int(retries))
+
+    def _request(self, payload, stream):
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(self.base + "/chat/completions", data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", "Bearer " + self.key)
+        if stream:
+            req.add_header("Accept", "text/event-stream")
+        return req
+
+    def _plain(self, payload):
+        req = self._request(dict(payload, stream=False), False)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as err:
+            detail = err.read().decode("utf-8", "replace")[:500]
+            raise ProviderError("HTTP %s: %s" % (err.code, detail))
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as err:
+            raise _Retryable("network error: %s" % err)
+        return body["choices"][0]["message"]["content"]
+
+    def _stream(self, payload):
+        """Streaming keeps bytes flowing while the model generates.
+
+        A non-streaming request is silent for the whole generation, and the
+        host's port forward drops an idle connection after ~15s (observed:
+        ~1 in 5 requests failed with RemoteDisconnected / WinError 10054).
+        """
+        req = self._request(dict(payload, stream=True), True)
+        pieces = []
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                for raw in resp:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except ValueError:
+                        continue
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    piece = (choices[0].get("delta") or {}).get("content")
+                    if piece:
+                        pieces.append(piece)
+        except urllib.error.HTTPError as err:
+            detail = err.read().decode("utf-8", "replace")[:500]
+            raise ProviderError("HTTP %s: %s" % (err.code, detail))
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as err:
+            raise _Retryable("stream dropped: %s" % err)
+        text = "".join(pieces)
+        if not text:
+            raise _Retryable("stream produced no content")
+        return text
 
     def chat(self, model, messages, temperature=0.3, max_tokens=4096, json_mode=False, top_p=None):
         payload = {
@@ -76,19 +143,22 @@ class OpenAICompat:
             payload["top_p"] = top_p
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(self.base + "/chat/completions", data=data, method="POST")
-        req.add_header("Content-Type", "application/json")
-        req.add_header("Authorization", "Bearer " + self.key)
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as err:
-            detail = err.read().decode("utf-8", "replace")[:500]
-            raise ProviderError("HTTP %s: %s" % (err.code, detail))
-        except urllib.error.URLError as err:
-            raise ProviderError("network error: %s" % err)
-        return body["choices"][0]["message"]["content"]
+
+        attempts = []
+        if self.stream:
+            attempts.append(self._stream)
+        attempts.append(self._plain)
+
+        last = None
+        for attempt_fn in attempts:
+            for attempt in range(self.retries):
+                try:
+                    return attempt_fn(payload)
+                except _Retryable as err:
+                    last = err
+                    if attempt + 1 < self.retries:
+                        time.sleep(1.5 * (attempt + 1))
+        raise ProviderError("request failed after retries: %s" % last)
 
     def vision(self, model, prompt, image_path, system=None, temperature=0.0):
         messages = []
@@ -107,7 +177,13 @@ class OpenAICompat:
 def build_client(cfg, mock=False):
     if mock:
         return Mock()
-    return OpenAICompat(cfg["api_base"], cfg.get("api_key", ""), timeout=int(cfg.get("timeout", 180)))
+    return OpenAICompat(
+        cfg["api_base"],
+        cfg.get("api_key", ""),
+        timeout=int(cfg.get("timeout", 180)),
+        stream=bool(cfg.get("stream", True)),
+        retries=int(cfg.get("retries", 3)),
+    )
 
 
 class Mock:

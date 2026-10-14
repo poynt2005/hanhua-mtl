@@ -20,7 +20,13 @@ SAKURA_MODEL="${SAKURA_MODEL:-hf.co/SakuraLLM/Sakura-GalTransl-14B-v3.8:Q4_K_M}"
 MODEL_URL="https://huggingface.co/SakuraLLM/Sakura-GalTransl-14B-v3.8/resolve/main/Sakura-Galtransl-14B-v3.8.gguf"
 
 # OCR service first, so /health is reachable while everything else is starting.
-nohup env PORT=8080 python /root/ocr_server.py >/root/ocr.log 2>&1 </dev/null &
+# It runs under a restart loop: a single bad page must not take the whole service
+# down, and GET /logs must stay reachable after a crash so the cause can be read.
+nohup bash -c 'while true; do
+    PORT=8080 python /root/ocr_server.py
+    echo "[start] ocr_server exited rc=$? - restarting in 2s"
+    sleep 2
+  done' >>/root/ocr.log 2>&1 </dev/null &
 
 # ollama
 nohup env OLLAMA_HOST="$OLLAMA_HOST" OLLAMA_CONTEXT_LENGTH="$OLLAMA_CONTEXT_LENGTH" \

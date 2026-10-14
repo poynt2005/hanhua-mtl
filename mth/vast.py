@@ -104,6 +104,12 @@ def create_instance(key, offer_id, image=DEFAULT_IMAGE, disk=60, ports=("8000", 
     try:
         return json.loads(out).get("new_contract")
     except json.JSONDecodeError:
+        # Surface WHY the offer was refused. vast reports the reason on stderr
+        # (e.g. "no_such_ask" for a stale bundle id, or the 16384-char args
+        # limit). Swallowing it turned a clear error into a mystery loop.
+        reason = (err or out or "").strip().replace("\n", " ")
+        if reason:
+            print("  create refused for offer %s: %s" % (offer_id, reason[:300]))
         return None
 
 

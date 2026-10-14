@@ -13,6 +13,7 @@ POST /ocr  -> just the blocks (kept for backward compatibility)
 GET  /health
 """
 import base64
+import faulthandler
 import io
 import os
 import sys
@@ -29,6 +30,50 @@ DILATE = int(os.environ.get("INPAINT_DILATE", "9"))
 # Vendored comic-text-detector checkout (see deploy/Dockerfile). Upstream ships
 # no package metadata, so it can only be used as a plain directory of modules.
 DETECTOR_DIR = os.environ.get("COMIC_TEXT_DETECTOR_DIR", "/opt/comic-text-detector")
+
+# Every log line also lands in this file, and GET /logs serves it over HTTP. That
+# is deliberate: a native crash kills the process, and without this the cause is
+# unrecoverable (no SSH into the container, stderr is redirected elsewhere).
+LOG_PATH = os.environ.get("OCR_LOG", "/root/ocr.log")
+
+
+def log(msg):
+    text = "[ocr] " + str(msg)
+    print(text, flush=True)
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+    except OSError:
+        pass
+
+
+# A hard crash (segfault/abort) otherwise kills the connection with no
+# explanation; faulthandler dumps a traceback into the same log file.
+try:
+    _fh = open(LOG_PATH, "a", buffering=1, encoding="utf-8")
+    faulthandler.enable(_fh)
+except OSError:
+    faulthandler.enable()
+
+
+def vram():
+    try:
+        import torch
+        if torch.cuda.is_available():
+            free, total = torch.cuda.mem_get_info()
+            used = total - free
+            return "vram %.1f/%.1f GB used" % (used / 2 ** 30, total / 2 ** 30)
+        return "vram no-cuda"
+    except Exception:  # noqa: BLE001
+        return "vram n/a"
+
+
+def _excepthook(exc_type, exc, tb):
+    import traceback
+    log("UNCAUGHT: " + "".join(traceback.format_exception(exc_type, exc, tb)))
+
+
+sys.excepthook = _excepthook
 
 _reader = None
 _mocr = None
@@ -218,7 +263,19 @@ def _hf_mbps():
 @app.get("/health")
 def health():
     return {"ok": True, "detector": bool(get_detector()), "inpaint": "lama",
-            "hf_mbps": _hf_mbps()}
+            "hf_mbps": _hf_mbps(), "vram": vram()}
+
+
+@app.get("/logs")
+def logs(n: int = 200):
+    """Tail of the service log. Survives a crash, so the cause can be fetched
+    over HTTP even when the process died (no SSH needed)."""
+    try:
+        with open(LOG_PATH, "r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()[-max(1, min(int(n), 5000)):]
+        return {"path": LOG_PATH, "lines": [line.rstrip("\n") for line in lines]}
+    except OSError as exc:
+        return {"path": LOG_PATH, "error": str(exc), "lines": []}
 
 
 @app.post("/ocr")
@@ -233,24 +290,40 @@ async def ocr(file: UploadFile = File(...), authorization: str = Header(default=
 async def prepare(file: UploadFile = File(...), authorization: str = Header(default="")):
     _auth(authorization)
     try:
-        img = Image.open(io.BytesIO(await file.read())).convert("RGB")
+        raw = await file.read()
+        log("prepare: received %d bytes" % len(raw))
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        log("prepare: page %dx%d | %s" % (img.width, img.height, vram()))
+
+        log("prepare: detect ...")
         boxes, seg = detect(img)
+        log("prepare: detect -> %d boxes, seg=%s | %s" % (
+            len(boxes), None if seg is None else tuple(seg.shape), vram()))
+
+        log("prepare: ocr ...")
         blocks = read_blocks(img, boxes)
+        log("prepare: ocr -> %d blocks | %s" % (len(blocks), vram()))
+
         cleaned_b64 = None
         try:
+            log("prepare: mask ...")
             mask = build_mask(img, boxes, seg)
+            log("prepare: inpaint ... (%d px masked) | %s" % (int((mask > 0).sum()), vram()))
             cleaned = inpaint(img, mask)
             buf = io.BytesIO()
             cleaned.save(buf, format="PNG")
             cleaned_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            log("prepare: done | %s" % vram())
         except Exception as exc:  # noqa: BLE001
-            print("[warn] inpaint unavailable (%s); returning blocks only" % exc)
+            log("prepare: inpaint unavailable (%s); returning blocks only" % exc)
         return {"blocks": blocks, "cleaned": cleaned_b64}
     except HTTPException:
         raise
     except Exception:  # noqa: BLE001
         import traceback
-        raise HTTPException(status_code=500, detail=traceback.format_exc()[-2000:])
+        detail = traceback.format_exc()
+        log("prepare: FAILED\n" + detail)
+        raise HTTPException(status_code=500, detail=detail[-2000:])
 
 
 if __name__ == "__main__":
