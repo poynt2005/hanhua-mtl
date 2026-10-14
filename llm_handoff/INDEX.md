@@ -23,6 +23,7 @@ agent needs to continue seamlessly from the current state.
 | 10 | `10_current_state_and_next_steps.md` | exact state + prioritised next steps |
 | 11 | `11_lessons_and_guardrails.md` | distilled cost-safety rules |
 | 12 | `12_hf_network_audit.md` | every function that can reach the network, and every HuggingFace touchpoint |
+| 13 | `13_operating_manual.md` | **the runbook**: measured cost model, the exact procedure, what made it work, verification, and a failure-lookup table |
 
 ## Related documents (kept in place, not duplicated here)
 
@@ -30,9 +31,11 @@ agent needs to continue seamlessly from the current state.
 |---|---|
 | `README.md` | project overview for users |
 | `AGENTS.md` | operating instructions for AI agents |
-| `deploy/VASTAI_PLAYBOOK.md` | hard rules + pitfall table for GPU rental |
+| `deploy/VASTAI_PLAYBOOK.md` | hard rules + pitfall table for GPU rental (read this first if you touch vast.ai) |
+| `llm_handoff/13_operating_manual.md` | the verified runbook + measured cost model |
 | `deploy/CODE_REVIEW.md` | review findings (mirror of doc 7) |
 | `deploy/Dockerfile` | the prebuilt GPU image |
+| `deploy/vast_watchdog.py` | enforces "one machine at a time" while a run is in flight |
 | `skills/vastai-cost-safety/` | portable cost-safety skill |
 
 ## TL;DR of the current state

@@ -83,6 +83,21 @@ Plus two human errors:
 | V40 | a stalled model pull looks "ready" | the LLM server answers 200 with an empty model list | readiness requires a **non-empty** model list |
 | V41 | a bad-network machine wastes 30 minutes pulling | no speed gate | probe the download speed at boot and fail fast below a threshold |
 | V42 | a prebuilt image boots but its services never start | the instance runs its own entrypoint (sshd), so the image `CMD` is not executed | pass an `--onstart-cmd` that runs the start script |
+| V43 | a **baked** image still failed on the first OCR call with `Remote end closed connection` | `transformers` performs a Hub *freshness* check on every `from_pretrained` even when the weights are cached; on a host that cannot reach HuggingFace it retries until the request fails | `HF_HUB_OFFLINE=1` + `TRANSFORMERS_OFFLINE=1` at runtime, and bake every weight into fixed cache paths (`HF_HOME`, `TORCH_HOME`, `EASYOCR_MODULE_PATH`) |
+| V44 | `detector` was `false` on every machine; detection silently fell back to EasyOCR | `pip install git+comic-text-detector` **cannot work** (no `setup.py`/`pyproject.toml`, no tags, not on PyPI) and the failure was hidden by `\|\| echo`; the package also needs `pyclipper`/`shapely`, and uses `pkg_resources` (removed in setuptools ≥ 81) | **vendor** it at a pinned commit, install its deps, patch out `pkg_resources` and the training-only `wandb` import, and assert it loads in the build smoke test |
+| V45 | the detector loaded but detection still degraded to EasyOCR | `detect()` unpacked the wrong return value (`mask, groups, _` instead of `mask, mask_refined, block_list`) and the resulting exception was swallowed | use the real return value; keep the broad `except` but only as a fallback |
+| V46 | every batch aborted mid-run with `Remote end closed connection` / `WinError 10054`, looking like a server crash | the host's port forward DROPS non-streaming requests: an LLM completion is silent for the whole generation, so the socket looks idle. Measured **4/6 non-streaming vs 6/6 streaming** | send LLM requests with `stream: true` and reassemble the SSE deltas; add bounded retries |
+| V47 | the full volume died at ~page 5 although the 20-page pilot passed | the OCR `/prepare` call is also non-streaming (no bytes until it finishes) and had **no retry**; the pilot only survived by luck | retry the OCR request too, and make errors name the endpoint |
+| V48 | a **second machine was rented** while the first was still alive | a leftover ad-hoc script read "my instance vanished" as "slow host, try the next offer" and re-rented; it bypassed the blacklist and the leftover cleanup that `vast up` performs | **SINGLE-INSTANCE INVARIANT**: `up` refuses while one of ours is running/loading; `enforce_single()` + `vast_current.txt`; a background watchdog destroys any extra instance we own. Never write ad-hoc rental code |
+| V49 | every `create instance` refused, with no reason | vast rejects a create when the whole `args` string exceeds **16384 chars**, and the injected start payload was ~19.7 KB | gzip+base64 the payload (~7.9 KB) and refuse to send anything oversized |
+| V50 | a rental round looked like "no machines available" | `create_instance()` discarded vast's stderr, hiding `no_such_ask` / "Invalid args" | surface the refusal reason when the reply cannot be parsed |
+| V51 | ~60 minutes of billing on one host that never finished booting | Docker Hub throughput is **per host**: one pulled the 15.5 GB image at 3.6 MB/s (16% in 12 min), another had the layers warm and reached `running` in **187 s** | add a pull watchdog (give up after N seconds), prefer hosts that already hold the image, and blacklist the slow host |
+| V52 | offers returned by the query are all refused | vast's bundle list goes **stale** (`no_such_ask`) within seconds | re-query every round instead of reusing one list; do not conclude "no GPUs available" |
+| V53 | a log-based progress counter went DOWN and looked like a stall | every line was written to `/root/ocr.log` twice (the server appends to the file **and** the shell redirected stdout into it) | write the file in exactly one place |
+| V54 | a runner's log stayed 0 bytes for an hour and looked like a crash | the child's output was captured (`capture_output=True`) and only printed at the very end | stream the child's output into the job log |
+| V55 | the wrong archive was picked for a page-count lookup | two different volumes had 237 pages | identify inputs by page count **and** skip any that already have an output archive |
+| V56 | a failed pilot destroyed the only debugging environment | a `finally: destroy` guard was added to guarantee "nothing left billing" | **keep the machine when a run fails** (that is exactly when it is needed); destroy only when the work is done or the user says so |
+| V57 | a native crash left no explanation at all | the process died with no traceback and the container is not reachable except by SSH | `faulthandler` into a log file, per-stage markers, VRAM in `/health`, a `GET /logs` HTTP endpoint, and a restart loop in the start script |
 
 ---
 
@@ -126,6 +141,44 @@ Plus two human errors:
 **R6 Access**
 20. An agent forbidden from touching vast must not rent, ssh, or destroy.
 21. **API keys live only in environment variables; never write them to files.**
+
+**R7 Exactly one machine, ever**
+22. **One instance at a time is a hard invariant.** `up` refuses while any
+    instance of ours is running or loading - it does not "clean up and continue".
+23. **Never write ad-hoc rental code.** Rental only happens through
+    `hanhua.py vast up`. A throwaway script that can rent is how a second machine
+    got started while the first was still up (two machines billing at once).
+24. Record the one instance you own (`vast_current.txt`) and run
+    `deploy/vast_watchdog.py` (or an equivalent) while a run is in flight: it
+    destroys any instance of ours that is not the recorded one. It must never
+    touch instances that lack our label.
+25. If an instance you created **disappears**, STOP and report - never
+    interpret it as "slow host, try the next offer" and keep renting.
+
+**R8 Failures keep the machine**
+26. A failed run **keeps** the machine. That is exactly the moment you need it
+    (logs, SSH, a re-run without re-pulling 15 GB). A `finally: destroy` guard
+    once threw away the only debugging environment - do not repeat that.
+27. Destroy when the work is verified complete, when the user says so, or when
+    the machine is provably unusable (see R7.5 / the pull watchdog).
+
+**R9 Pick hosts that can actually pull**
+28. Docker Hub throughput is **per host**. Measure the pull: if the image is not
+    down within ~15 minutes, destroy and switch (a warm-cached host can boot the
+    same 15 GB image in ~3 minutes).
+29. Prefer hosts that already hold the image; blacklist hosts that pulled slowly.
+
+**R10 Make transports survive and failures visible**
+30. **Never send a long silent request.** A non-streaming completion leaves the
+    socket idle for the whole generation and the host's port forward drops it.
+    Stream it, and retry transient transport errors (both the LLM and the OCR
+    client).
+31. Build in diagnosability before renting: `faulthandler` to a log file,
+    per-stage log markers, VRAM in `/health`, a `GET /logs` endpoint reachable
+    over HTTP, and a restart loop for the service. A silent native crash is
+    undebuggable and wastes a whole rental.
+32. Identify work items unambiguously (two different volumes had 237 pages) -
+    page count alone is not an identity. Skip inputs that already have outputs.
 
 ## Violations
 

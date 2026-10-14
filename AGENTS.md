@@ -209,15 +209,32 @@ When the user gives you `api_base` / `ocr_url`, put them in `config.json` and us
 
 - No renting without explicit user consent; report the budget first.
 - **$1 cap per task**; first line of every report is the money.
+- **One machine at a time.** `vast up` refuses to rent while one of ours is
+  running/loading. **Never write a script that can rent** - rental only happens
+  through `hanhua.py vast up`. Run `deploy/vast_watchdog.py` while a run is in
+  flight; it destroys any extra instance we own (never the user's others).
+- **A failed run KEEPS the machine.** It is the debugging environment. Destroy
+  only when the work is verified complete, or the user says so.
+- **Never send a long silent request.** Stream LLM responses and retry transient
+  drops in both the LLM and the OCR client; a non-streaming request is silent
+  during generation and the host's port forward drops it after ~15 s.
+- Prefer hosts that already hold the image (Docker Hub speed is per host); if a
+  pull will not finish in ~15 minutes, destroy and switch; blacklist slow hosts.
 - Run `deploy/net_check.sh` within 5 minutes of boot; on `NET_BAD` destroy and
   switch machines — do not debug a bad host.
 - Three gates before a batch: `/v1/models` returns a model → single-sentence test
   200 → no stale process.
-- Judge success by **content** (non-empty output), not line counts.
+- Judge success by **content** (non-empty output) and by `_verify.py` (page
+  count, page order, image dimensions, translation coverage), not line counts.
 - Never `scp` model weights or big wheels to the remote; download on the remote.
 - Before destroying, pull artifacts back and verify; after destroying, confirm
   `show instances` is empty.
 - API keys live only in environment variables; never write them to files.
+
+> The measured cost of doing this right: **~15 cents per 250-page volume**
+> (~15 s/page). See `llm_handoff/13_operating_manual.md` for the runbook and
+> `deploy/VASTAI_PLAYBOOK.md` for the pitfall table (V43-V57 are this project's
+> own, paid for in real money).
 
 ---
 

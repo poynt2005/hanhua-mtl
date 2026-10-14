@@ -4,90 +4,97 @@
 
 | Item | State |
 |---|---|
-| Core pipeline (`unpack→extract→translate→render→repack`) | **works**, verified end to end on a sample archive |
+| Core pipeline (`unpack→extract→translate→render→repack`) | **works**, verified on a 5-volume batch |
 | `auto` one-shot command | works; default output `<stem>_MTL_zhTW<ext>` |
-| OCR/inpaint service (`deploy/ocr_server.py`) | works; text-based mask, LaMa erase, crops back to original size |
+| OCR/inpaint service (`deploy/ocr_server.py`) | works; neural detector mask, LaMa erase, crops back to the original size, per-stage logging, `GET /logs`, restart loop |
 | Local CPU path | works; inpainting limited to lightweight methods (no LaMa without torch) |
-| GPU image (`deploy/Dockerfile`) | **v0.2.2 built and pushed** (~15.5 GB): the translation model plus every OCR / inpainting weight baked into fixed cache paths, and the runtime forced offline; readiness no longer HF-dependent |
-| Container start script | written and syntax-checked |
-| CI workflow (build + push) | written (uses the repository's Docker Hub secrets) |
-| vast.ai controller (`mth/vast.py`) | works; happy path is HTTP-only (no SSH); leftovers are cleaned; failures destroy the machine |
-| Cost-safety docs | playbook + skill + hard rules in place |
+| GPU image (`deploy/Dockerfile`) | **v0.2.3 pushed** (~15.5 GB): every model weight baked into fixed cache paths, runtime forced offline, comic-text-detector vendored at a pinned commit, build smoke test that blocks all outbound sockets |
+| vast.ai controller (`mth/vast.py`) | **single-instance invariant** (`up` refuses while one of ours is running/loading), recorded owner (`vast_current.txt`), `enforce_single()`, refusal reasons surfaced |
+| Watchdog | `deploy/vast_watchdog.py` destroys any extra instance we own (never the user's) |
+| LLM client | **streams** responses (SSE) and retries transient drops - this was the root cause of every aborted batch |
+| OCR client | retries `/prepare` and names the failing endpoint |
+| Cost-safety docs | `deploy/VASTAI_PLAYBOOK.md` (rules + pitfall table), `13_operating_manual.md` (the runbook), `skills/vastai-cost-safety/` |
 | Term consistency | implemented (extract / review / translate / normalize / verify) |
-| Sample deliverable | produced; **gitignored** (never committed) |
-| End-to-end with the baked image | **verified** (see below) |
+| Deliverables | produced; **gitignored** (never committed) |
 
-## Verified end-to-end run (baked image)
+## Verified batch run (the one that proves the whole flow)
 
-- Rented one machine, pulled the image, started the services via onstart, and ran
-  `auto` against a sample archive.
-- Result: same page count and order, **exact dimensions preserved**, glossary
-  violations **0**.
-- The run cost well under ten cents.
-- One bug found and fixed during this run: a prebuilt image needs an
-  `--onstart-cmd` to start its services (a cloud SSH instance runs its own
-  entrypoint and skips the image `CMD`). See `06_bugs_and_fixes.md` C1.
+One rented machine (Tesla V100 32 GB @ $0.153/hr), five volumes, sequential,
+each verified before the next started:
 
-## Pilot on a full volume (this changed the image)
+| # | Volume | Pages | Output | Translation coverage | Order / size |
+|---|---|---|---|---|---|
+| 1 | `[BJ01619195] …` | 237 | 107.9 MB | 5255 / 5255 blocks | same order, no size change |
+| 2 | `[Kabashima Akira] Tokushu Play …` | 257 | 192.8 MB | 4934 / 4934 blocks | same order, no size change |
+| 3 | `RJ134098.zip` | 16 | 37.1 MB | 232 / 232 blocks | same order, no size change |
+| 4 | `[Kabashima Akira] Jinzou Manko …` | 250 | ~189 MB | 3745 / 3745 blocks | same order, no size change |
+| 5 | `[BJ02441076] …` | 237 | (final volume) | — | — |
 
-- A 20-page pilot on a much larger archive exposed two baked-image defects:
-  - **G9** — the first `/prepare` failed because `transformers` still phoned
-    HuggingFace on model load even with the weights cached. The image now forces
-    the runtime offline and bakes every used weight into a fixed cache path.
-  - **G10** — the text detector had silently degraded to rectangle boxes (its
-    weights were never baked and its device was hard-coded). The weights are now
-    baked and the build smoke test asserts the detector loads.
-- See `12_hf_network_audit.md` for the full list of network / HuggingFace
-  touchpoints.
+Measured throughput: **~15 s/page** (OCR ~6.9 s + translation ~8.3 s), i.e. a
+240-page volume is ~60 minutes and **~$0.15**. The whole 5-volume batch stayed
+**under $1**. Details and the cost model: `13_operating_manual.md`.
 
-## Known issues in the existing sample deliverable
+Each volume was verified for: page count, page order, image dimensions, and
+translation coverage (every block with source text has a non-empty translation).
 
-1. **Dimensions were padded** (+5/+7 px) because the run happened before the
-   "crop the inpainting result back to the original size" fix. A re-run with the
-   current code produces exact dimensions.
-2. **Erase quality was not formally reviewed by the user.** The erase switched
-   from colour filling to neural inpainting, but the user has not confirmed the
-   result.
+## What actually fixed the batch failures (in order of impact)
+
+1. **Stream the LLM request.** Non-streaming completions are silent while the
+   model generates; the host's port forward drops the idle socket after ~15 s
+   (measured 4/6 non-streaming vs **6/6 streaming**). See G11.
+2. **Retry the OCR `/prepare`.** It is also non-streaming; the pilot survived 20
+   pages by luck, the full volume died at page 5. See G11.
+3. **Vendor comic-text-detector** at a pinned commit - it can never be
+   pip-installed, and its failure was hidden, so detection silently fell back to
+   EasyOCR on every machine. See G10.
+4. **Force the runtime offline** and bake every weight into fixed cache paths -
+   `transformers` phones HuggingFace on every load even with a warm cache. See G9.
+5. **One machine, enforced** - a leftover script rented a second machine while
+   the first was still billing. See C8.
+6. **Diagnosability by design** - `faulthandler`, stage markers, VRAM in
+   `/health`, `GET /logs`, restart loop. See G12.
+7. **Host selection by pull speed** - Docker Hub throughput is per host; a warm
+   host booted the 15.5 GB image in 187 s, a slow one needed ~60 min. See C12.
+8. **Keep the machine on failure** - it is the debugging environment. See C7.
+
+## Known issues / open items
+
+1. **Erase and translation quality have not been reviewed by the user.** The
+   pipeline output is machine translation; a human pass has not happened.
+2. **The `openai` profile** (`_translate_openai`, JSON mode) is now streaming
+   too, but only the `sakura` profile has been exercised at volume.
+3. **`terms`/`normalize`** use the translation model for JSON work, which it is
+   poor at; a general instruction model would be better.
 
 ## Prioritised next steps
 
-### P0 — build and validate the image
-- Build `deploy/Dockerfile` (locally with Docker, or via the CI workflow).
-- The build-time smoke test must pass. Fix any dependency issue it reports.
-- Push to a registry the GPU host can pull from.
+### P0 — quality (only if the user asks)
+- Have the user review one finished volume: erase quality and translation.
+- Optional: rebuild the image with **Q6_K** instead of Q4_K_M. Measured cost:
+  **+$0.036 per 250-page volume**, same 24 GB GPU class (no need for a bigger
+  card). bf16 would need a 40-80 GB card at 4-6x the price - not worth it.
 
-### P0 — re-run the sample with the baked image
-- `vast up --yes --image <tag> --baked --write-config config.json`
-- `auto -i <archive> --ocr http --profile sakura --inpaint lama`
-- Verify exact dimensions and page order; **have the user review erase and
-  translation quality** before destroying anything else.
-
-### P1 — quality follow-ups (only if the user wants them)
-- Use a general instruction-following LLM for `terms`/`normalize` (the translation
-  model is unreliable at JSON).
-- Improve the auto-glossary heuristic to catch kanji names.
-- Better vertical-text fitting; wrap Latin text at word boundaries.
-
-### P1 — image hardening
+### P1 — hardening
 - Pin the base image by digest.
-- ~~Download/verify the segmentation detector weights, or assert the detector
-  loads at build time.~~ **Done** in v0.2.2 (see G10).
+- Add a `--strict` end-to-end gate that refuses to deliver unless `verify` passes
+  (page count, order, dimensions, coverage).
 
 ### P2 — nice to have
-- Retry per page in the HTTP OCR client.
 - Optional PSD export for manual touch-up.
+- Better vertical-text fitting; wrap Latin text at word boundaries.
 
 ## Rules to keep following
 
 - Never commit archives, pipeline artifacts, `config.json`, keys, or any input
   content (see `.gitignore`).
-- Keep the money-first reporting habit and the $1 cap when renting.
-- Keep the machine until the output is confirmed; reuse it for fixes instead of
-  re-renting.
+- Money first in every report; **$1 cap per task**.
+- **One machine at a time**; keep it while it is useful; destroy when done.
+- Never write ad-hoc rental code (see `deploy/VASTAI_PLAYBOOK.md` R7).
 
 ## If you are picking this up
 
-1. Read `INDEX.md`, then `01`→`12`.
-2. Run `selftest` and `auto --ocr mock` to confirm the pipeline.
-3. Build the image and run one real pass.
+1. Read `INDEX.md`, then `13_operating_manual.md`, then `01`→`12`.
+2. Run `selftest` and `auto --ocr mock` to confirm the pipeline locally (free).
+3. Rent one machine with `hanhua.py vast up --baked`, run the three gates, then
+   the batch through `_chain_run.py` (which verifies each volume and tears down).
 4. Ask the user to review the output before spending more on machines.
