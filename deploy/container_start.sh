@@ -3,6 +3,11 @@
 # Everything else is already baked into the image, so this is fast and reliable.
 set -u
 export PATH=/usr/local/bin:/opt/conda/bin:$PATH
+# Use the model weights baked into the image; never call HuggingFace at runtime
+# (datacenter IPs are often unreachable/throttled, which made the first OCR
+# request hang retrying the Hub and fail).
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
 export OLLAMA_HOST="0.0.0.0:8000"
 export OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}"
 export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}"

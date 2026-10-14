@@ -194,16 +194,16 @@ def instance_info(key, iid):
         return {}
 
 
-def wait_running(key, iid, timeout=1200, stall_timeout=240, log=print):
-    """Wait for the instance to run, monitoring the image-pull progress.
+def wait_running(key, iid, timeout=1500, log=print):
+    """Wait for the instance to run while logging image-pull progress.
 
-    The image is large, so a slow-but-progressing pull is fine. We watch
-    `status_msg`; every change is logged (visible progress), and a pull that
-    shows no change for `stall_timeout` seconds is treated as a bad host.
+    A large image has big layers that download for minutes with no status change,
+    so we do NOT use a generic stall timeout. The only early give-up is a pull
+    that is repeatedly *retrying* (a real failure).
     """
     start = time.time()
     last_msg = None
-    last_change = start
+    retry_since = None
     info = {}
     while time.time() - start < timeout:
         info = instance_info(key, iid)
@@ -213,10 +213,10 @@ def wait_running(key, iid, timeout=1200, stall_timeout=240, log=print):
         now = time.time()
         if msg != last_msg:
             last_msg = msg
-            last_change = now
             log("  pull %4ds | %s" % (int(now - start), msg[:70]))
-        elif now - last_change > stall_timeout:
-            log("  pull stalled for %ds -> giving up" % stall_timeout)
+            retry_since = now if "retrying" in msg.lower() else None
+        if retry_since is not None and now - retry_since > 120:
+            log("  pull stuck retrying for 120s -> giving up")
             return info
         time.sleep(15)
     return info
