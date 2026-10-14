@@ -7,6 +7,13 @@ part (see `14_thrashing_postmortem.md` for the distilled lessons).
 
 **Money for the whole session: $0.974** (vast credit 7.59 → 6.616).
 
+> **Naming note:** scripts named `_something.py` in this log were the author's
+> scratch files during the session. They are **not** in the repository; the ones
+> worth keeping were rewritten and now live in `tools/` under proper names
+> (`rent_and_run.py`, `gate.py`, `pull_watch.py`, `verify_batch.py`,
+> `run_batch.py`, `audit_detection.py`, `audit_sheets.py`, `collect.py`). If you
+> see `_x.py` here, look for the equivalent in `tools/`.
+
 ---
 
 ## 1. Where it started
