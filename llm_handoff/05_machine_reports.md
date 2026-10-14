@@ -42,9 +42,19 @@ grouped.
 | M25 | V100 | low | mid | model download **stalled at 19%** | destroyed |
 | M26, M27 | RTX 3090 ×2 | mid | high | created concurrently by two controller processes | destroyed |
 | M28 | V100 | mid | very high | prebuilt image; fast image pull (~38 MB/s), fast model pull (~264 MB/s), HF probe 32 MB/s | **SUCCESS** (baked image, exact dimensions, 0 violations) → destroyed |
+| M29 | V100 | mid | high | 15.5 GB image pulled at **3.6 MB/s** (16% in 12 min → ~60 min projected) | destroyed (slow Docker Hub path, host blacklisted) |
+| M30 | V100 | mid | high | warm layer cache → **`running` in 187 s**; endpoints up; `detector: true`; no OOM (12.5/31.7 GB) | **SUCCESS - the 5-volume batch** (1034 pages, all verified) → destroyed at the end |
+| M31 | V100 | mid | — | created by a **leftover ad-hoc script** that read "my instance vanished" as "try the next offer" | destroyed immediately (this is what produced the single-instance invariant) |
+| M32 | V100 | mid | — | rented for `:0.5.0` while the image build was still running; `manifest for <repo>:0.5.0 not found` | destroyed in **46 s** ($0.002) |
+
+## Offers that were refused
 
 Offers that were already taken (create returned "not available"): 5 separate
 attempts across runs; no instance was created and no meaningful cost accrued.
+
+Also seen: vast's bundle list goes **stale within seconds** (`no_such_ask`) and a
+create is refused when the whole `args` string exceeds **16384 characters** -
+both were initially invisible because the helper discarded vast's stderr.
 
 ## Patterns
 

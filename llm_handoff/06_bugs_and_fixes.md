@@ -31,6 +31,7 @@ from other documents.
 | G13 | a log-based progress counter went DOWN, looking like a stall | every line reached `/root/ocr.log` twice (the server appends to the file **and** the shell redirected the service's stdout into it) | write the log file in exactly one place |
 | G14 | a runner's log stayed 0 bytes for an hour, looking like a crash | the child's output was captured (`capture_output=True`) and printed only after each volume | stream the child's output into the job log |
 | G15 | `ollama pull hf.co/SakuraLLM/Sakura-GalTransl-14B-v3.8:Q6_K` cannot resolve, and the quality of the shipped quant was never justified | no file in that repo contains the string `Q6_K` (the *unsuffixed* GGUF is Q6_K), and the quant was inherited from the "Q4_K_M is the default" habit rather than measured | download the unsuffixed GGUF and `ollama create` from a Modelfile; choose the quant from evidence (llama.cpp perplexity table, the VRAM-headroom rule, and what the model's own authors deploy - SakuraLLM's tutorial uses Q6_K) |
+| G16 | whole pages were delivered with the original Japanese still on them, while every check still passed | a **single** detection pass misses whole classes of text (vertical lines, white-on-dark, low contrast). Page count/order/dimensions and "100% of *detected* blocks translated" all looked perfect. An objective audit (input page vs delivered page, by text-stroke density) found **74 of 1034 pages unchanged and still text-like**, ~32 of them real text pages; one volume had **20 consecutive pages** missed | plain pass first, then **escalate** to rotated (vertical) and inverted (white-on-dark) passes when it finds fewer than 5 boxes; map rotated boxes back to the original coordinates (unit-tested) and dedup by IoU; `DET_SIZE` 1024 -> 1280 |
 
 ## C. Controller logic
 
@@ -56,6 +57,7 @@ from other documents.
 | C11 | offers were refused seconds after being listed | vast's bundle list goes **stale** (`no_such_ask`) | re-query the offer list every round; do not conclude "no GPUs available" |
 | C12 | ~60 minutes of billing on a host that never finished booting | Docker Hub throughput is per host (one pulled at 3.6 MB/s = 16% in 12 min; another with warm layers reached `running` in 187 s) | pull watchdog + prefer hosts that already hold the image + blacklist the slow host |
 | C13 | the wrong archive was selected for a page-count lookup | two different volumes both had 237 pages | identify an input by page count **and** skip anything that already has an output archive |
+| C14 | a machine was rented for an image that did not exist yet | a run was launched while the CI build was still going; vast booted an instance that reported `manifest for <repo>:<tag> not found`, and the controller would then wait minutes for a boot that could never happen | **check the registry tag exists before renting** (`hub.docker.com/v2/repositories/<repo>/tags/<tag>`); the pilot script now aborts instead of renting |
 
 ## D. Quality
 
