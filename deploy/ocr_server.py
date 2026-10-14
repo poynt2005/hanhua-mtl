@@ -31,6 +31,22 @@ DILATE = int(os.environ.get("INPAINT_DILATE", "9"))
 # no package metadata, so it can only be used as a plain directory of modules.
 DETECTOR_DIR = os.environ.get("COMIC_TEXT_DETECTOR_DIR", "/opt/comic-text-detector")
 
+# Detection passes to union. A single pass misses whole classes of text:
+#   asis   - normal black-on-light text
+#   rot90  - vertical lines become horizontal (the detector is far better at
+#            horizontal text; manga-image-translator has the same idea as
+#            `det_auto_rotate`)
+#   rot270 - the other direction, in case the page is mirrored/rotated
+#   invert - white text on dark backgrounds
+# Measured motivation: a cv2 audit found ~32-74 of 1034 delivered pages still
+# carried untranslated text because a single pass had missed it.
+DET_VARIANTS = [v.strip() for v in os.environ.get(
+    "DET_VARIANTS", "asis,rot90,rot270,invert").split(",") if v.strip()]
+DET_SIZE = int(os.environ.get("DET_SIZE", "1280"))
+# Only escalate to the extra passes when the plain pass found suspiciously
+# little text - the extra passes cost ~4x and most pages do not need them.
+DET_ESCALATE_BELOW = int(os.environ.get("DET_ESCALATE_BELOW", "5"))
+
 # Every log line also lands in this file, and GET /logs serves it over HTTP. That
 # is deliberate: a native crash kills the process, and without this the cause is
 # unrecoverable (no SSH into the container, stderr is redirected elsewhere).
@@ -150,7 +166,7 @@ def get_detector():
                 raise FileNotFoundError(
                     "comictextdetector.pt not found (looked under %s)" % DETECTOR_DIR)
             detector_cls = _import_text_detector()
-            _detector = detector_cls(model_path=weights, input_size=1024,
+            _detector = detector_cls(model_path=weights, input_size=DET_SIZE,
                                      device=_pick_device(), act="leaky")
         except Exception as exc:  # noqa: BLE001
             print("[warn] comic-text-detector unavailable: %s" % exc)
@@ -166,27 +182,134 @@ def get_lama():
     return _lama
 
 
+def _line_boxes(blocks):
+    boxes = []
+    for block in blocks:
+        for line in getattr(block, "lines", None) or []:
+            xs = [point[0] for point in line]
+            ys = [point[1] for point in line]
+            boxes.append([int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))])
+    return boxes
+
+
+def _rot90_box_to_base(box, base_w):
+    """Map a box detected on np.rot90(base, 1) back to base coordinates.
+
+    rot90(m, 1) sends base (x, y) to (x' = y, y' = base_w - 1 - x), so the
+    inverse of a box is [base_w-1-y1, x0, base_w-1-y0, x1].
+    """
+    x0, y0, x1, y1 = box
+    return [base_w - 1 - y1, x0, base_w - 1 - y0, x1]
+
+
+def _rot270_box_to_base(box, base_h):
+    """Map a box detected on np.rot90(base, 3) back to base coordinates.
+
+    rot90(m, 3) sends base (x, y) to (x' = base_h - 1 - y, y' = x), so the
+    inverse of a box is [y0, base_h-1-x1, y1, base_h-1-x0].
+    """
+    x0, y0, x1, y1 = box
+    return [y0, base_h - 1 - x1, y1, base_h - 1 - x0]
+
+
+def _box_area(box):
+    return max(0, box[2] - box[0]) * max(0, box[3] - box[1])
+
+
+def _iou(a, b):
+    ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
+    ix1, iy1 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+    union = _box_area(a) + _box_area(b) - inter
+    return inter / union if union else 0.0
+
+
+def _dedup_boxes(boxes, iou_limit=0.4):
+    """The passes overlap heavily; keep the largest of each cluster so the OCR
+    stage does not do the same crop several times."""
+    kept = []
+    for box in sorted(boxes, key=_box_area, reverse=True):
+        if _box_area(box) <= 0:
+            continue
+        if any(_iou(box, other) > iou_limit for other in kept):
+            continue
+        kept.append(box)
+    return kept
+
+
+def _run_variant(det, variant, base, width, height):
+    """One detector pass. Returns (boxes_in_base_coords, mask_in_base_coords)."""
+    if variant == "asis":
+        arr, back, mask_back = base, None, None
+    elif variant == "rot90":
+        arr = np.rot90(base, 1).copy()
+        back = lambda box: _rot90_box_to_base(box, width)   # noqa: E731
+        mask_back = lambda m: np.rot90(m, -1)               # noqa: E731
+    elif variant == "rot270":
+        arr = np.rot90(base, 3).copy()
+        back = lambda box: _rot270_box_to_base(box, height)  # noqa: E731
+        mask_back = lambda m: np.rot90(m, 1)                 # noqa: E731
+    elif variant == "invert":
+        arr = (255 - base).astype(np.uint8)
+        back, mask_back = None, None
+    else:
+        return [], None
+    _mask, mask, blocks = det(arr)
+    boxes = _line_boxes(blocks)
+    if back is not None:
+        boxes = [back(box) for box in boxes]
+    mask = np.asarray(mask)
+    if mask_back is not None and getattr(mask, "size", 0):
+        mask = mask_back(mask)
+    if getattr(mask, "size", 0):
+        mask = mask[:height, :width]
+    else:
+        mask = None
+    return boxes, mask
+
+
 def detect(img):
     """Return (boxes, text_mask_or_None).
 
-    When comic-text-detector is available the second element is the model's
-    refined per-pixel text mask (used directly for inpainting). Otherwise it is
-    None and build_mask falls back to Otsu inside the EasyOCR boxes.
+    The first pass is the plain one. Extra passes (rotated, inverted) are only
+    run when that pass finds suspiciously little text - those passes recover
+    vertical lines and white-on-dark text, but they cost 4x, and most pages do
+    not need them. Measured motivation: ~32-74 of 1034 delivered pages still
+    carried untranslated text because a single pass had missed it.
     """
-    arr = np.array(img)[:, :, ::-1]
     det = get_detector()
     if det is not None:
         try:
-            _mask, mask_refined, blocks = det(arr)
-            boxes = []
-            for block in blocks:
-                for line in getattr(block, "lines", None) or []:
-                    xs = [point[0] for point in line]
-                    ys = [point[1] for point in line]
-                    boxes.append([int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))])
-            return boxes, np.asarray(mask_refined)
+            base = np.array(img)[:, :, ::-1]          # BGR, as the detector wants
+            height, width = base.shape[:2]
+            order = [v for v in DET_VARIANTS]
+            if "asis" in order:
+                order.remove("asis")
+                order.insert(0, "asis")
+
+            all_boxes, mask_total, used = [], None, []
+            for index, variant in enumerate(order):
+                if index and len(all_boxes) >= DET_ESCALATE_BELOW:
+                    break          # the first pass found enough; skip the rest
+                try:
+                    boxes, mask = _run_variant(det, variant, base, width, height)
+                except Exception as exc:  # noqa: BLE001
+                    log("detect[%s] failed: %s" % (variant, exc))
+                    continue
+                used.append(variant)
+                log("detect[%s] -> %d boxes%s" % (
+                    variant, len(boxes),
+                    "  (escalating: too few)" if index == 0 and len(boxes) < DET_ESCALATE_BELOW else ""))
+                all_boxes.extend(boxes)
+                if mask is not None:
+                    mask_total = mask if mask_total is None else np.maximum(mask_total, mask)
+
+            merged = _dedup_boxes(all_boxes)
+            log("detect: %d raw -> %d after dedup (passes used=%s)"
+                % (len(all_boxes), len(merged), ",".join(used)))
+            return merged, mask_total
         except Exception as exc:  # noqa: BLE001
-            print("[warn] detector failed, falling back to easyocr: %s" % exc)
+            log("detector failed, falling back to easyocr: %s" % exc)
     results = get_reader().readtext(np.array(img), detail=1, paragraph=False)
     boxes = []
     for bbox, _t, _c in results:
