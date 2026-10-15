@@ -1,9 +1,10 @@
 name: build-sakura-ollama-image
 
-# Branch-scoped build: a LEAN ollama runtime with the Sakura GGUF baked in,
-# for translation endpoints (no OCR stack, unlike the master-branch image).
+# Branch-scoped build: a LEAN ollama runtime with the Sakura translation model
+# baked in, for translation endpoints (no OCR stack, unlike the master image).
 #
-#   image: docker.io/<DOCKERUSR>/hanhua-gpu:sakura-qwen3-q6k
+#   image: docker.io/<DOCKERUSR>/hanhua-gpu:sakura-v3.8-q6k
+#   model: Sakura-GalTransl-14B-v3.8 Q6_K (baked; use the "galtransl" prompt profile)
 #
 # Tag policy: this workflow pushes EXACTLY ONE tag, deliberately distinct from
 # the master-branch image tags (<version> and :latest) built by build-image.yml,
@@ -49,4 +50,4 @@ jobs:
           # No cache: the 12 GB model layer cannot fit the GHA cache (10 GB repo
           # limit), and a fresh HuggingFace download on the runner takes minutes.
           tags: |
-            ${{ secrets.DOCKERUSR }}/hanhua-gpu:sakura-qwen3-q6k
+            ${{ secrets.DOCKERUSR }}/hanhua-gpu:sakura-v3.8-q6k
