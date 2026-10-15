@@ -1,0 +1,52 @@
+name: build-sakura-ollama-image
+
+# Branch-scoped build: a LEAN ollama runtime with the Sakura GGUF baked in,
+# for translation endpoints (no OCR stack, unlike the master-branch image).
+#
+#   image: docker.io/<DOCKERUSR>/hanhua-gpu:sakura-qwen3-q6k
+#
+# Tag policy: this workflow pushes EXACTLY ONE tag, deliberately distinct from
+# the master-branch image tags (<version> and :latest) built by build-image.yml,
+# so the two can never clash. It never triggers on tags and never touches master.
+#
+# Required secrets: DOCKERUSR / DOCKERPASS (same as build-image.yml).
+
+on:
+  push:
+    branches:
+      - sakura-ollama
+    paths:
+      - deploy/ollama-sakura/**
+      - .github/workflows/build-sakura-image.yml
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner has ~14 GB free; the ollama base plus the 12 GB GGUF and the
+      # resulting model blob need more.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERUSR }}
+          password: ${{ secrets.DOCKERPASS }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: deploy/ollama-sakura
+          file: deploy/ollama-sakura/Dockerfile
+          push: true
+          # No cache: the 12 GB model layer cannot fit the GHA cache (10 GB repo
+          # limit), and a fresh HuggingFace download on the runner takes minutes.
+          tags: |
+            ${{ secrets.DOCKERUSR }}/hanhua-gpu:sakura-qwen3-q6k
