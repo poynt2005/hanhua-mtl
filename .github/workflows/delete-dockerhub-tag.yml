@@ -1,0 +1,42 @@
+name: delete-dockerhub-tag
+
+# Branch-scoped ops helper: deletes stray tags from
+# docker.io/<DOCKERUSR>/hanhua-gpu.
+#
+# To request a deletion: add a file under ops/delete-tag/ whose CONTENT is the
+# tag name, and push. Uses the same DOCKERUSR / DOCKERPASS secrets as
+# build-image.yml. Branch-scoped; never runs on master.
+
+on:
+  push:
+    branches: [sakura-ollama]
+    paths:
+      - "ops/delete-tag/*"
+  workflow_dispatch:
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Delete requested tags
+        env:
+          U: ${{ secrets.DOCKERUSR }}
+          P: ${{ secrets.DOCKERPASS }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(ops/delete-tag/*)
+          if [ ${#files[@]} -eq 0 ]; then echo "no deletion requests"; exit 0; fi
+          TOKEN=$(curl -s -X POST -H "Content-Type: application/json" \
+            -d "{\"username\":\"$U\",\"password\":\"$P\"}" \
+            https://hub.docker.com/v2/users/login/ | python3 -c "import json,sys; print(json.load(sys.stdin)['token'])")
+          for f in "${files[@]}"; do
+            tag=$(tr -d '[:space:]' < "$f")
+            [ -z "$tag" ] && { echo "empty request $f"; continue; }
+            echo "deleting tag: $tag"
+            code=$(curl -s -o /tmp/resp -w "%{http_code}" -X DELETE \
+              -H "Authorization: JWT $TOKEN" \
+              "https://hub.docker.com/v2/repositories/$U/hanhua-gpu/tags/$tag/")
+            echo "  HTTP $code: $(head -c 300 /tmp/resp)"
+          done
