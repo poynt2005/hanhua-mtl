@@ -190,6 +190,10 @@ def cmd_auto(args):
     try:
         mapping = archive.extract(args.input, raw)
         project = pipeline.do_extract(raw, cfg, args.ocr, client)
+        paired = pipeline.pair_by_names(project, mapping)
+        if paired:
+            print("clean twin: %d page(s) will be typeset onto the textless copy "
+                  "(no inpainting)" % paired)
         gpath = args.glossary or cfg.get("glossary_file") or ""
         if not gpath and args.auto_terms:
             gpath = _auto_glossary(project, cfg, client, os.path.join(work, "glossary.json"))
@@ -291,6 +295,10 @@ def cmd_book(args):
     try:
         mapping = archive.extract(args.input, raw)
         project = pipeline.do_extract(raw, cfg, args.ocr, client)
+        paired = pipeline.pair_by_names(project, mapping)
+        if paired:
+            print("clean twin: %d page(s) will be typeset onto the textless copy "
+                  "(no inpainting)" % paired)
         project = pipeline.do_translate(project, cfg, client)
         pipeline.do_render(project, raw, out, cfg)
         archive.repack(args.input, out, mapping, dest)

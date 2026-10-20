@@ -1,5 +1,7 @@
 import glob
 import os
+import re
+import shutil
 
 from PIL import Image
 
@@ -7,13 +9,24 @@ from . import ocr, providers, render
 from .schema import new_block, new_page, new_project
 
 
+# Every page format an archive can hold. Kept in sync with archive.IMAGE_EXT: a
+# page this list misses is extracted but never rendered, and repack then aborts
+# with "translated page missing" (or, worse, silently drops the page).
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff")
+
+
 def list_images(input_dir, pattern):
-    files = sorted(glob.glob(os.path.join(input_dir, pattern)))
-    if not files:
-        for alt in ("*.jpg", "*.jpeg", "*.webp", "*.bmp"):
-            files.extend(glob.glob(os.path.join(input_dir, alt)))
-        files = sorted(files)
-    return files
+    """All page images in a folder, whatever their extension.
+
+    `pattern` is only a hint for the dominant format: real archives mix
+    extensions (a .webp cover next to .jpg pages), so selecting a single glob
+    loses pages. Never narrow the result to one extension here.
+    """
+    files = set(glob.glob(os.path.join(input_dir, pattern)))
+    for ext in IMAGE_EXTS:
+        files.update(glob.glob(os.path.join(input_dir, "*" + ext)))
+        files.update(glob.glob(os.path.join(input_dir, "*" + ext.upper())))
+    return sorted(files)
 
 
 def reading_order(blocks):
@@ -22,6 +35,55 @@ def reading_order(blocks):
     heights = [b["bbox"][3] - b["bbox"][1] for b in blocks]
     row = max(20, int(sum(heights) / len(heights) * 0.6))
     return sorted(blocks, key=lambda b: (round(b["bbox"][1] / row), -b["bbox"][0]))
+
+
+_TEXT_MARK = re.compile(r"[_\-]t(\d+)", re.I)
+_CLEAN_MARK = re.compile(r"[_\-]n(\d+)", re.I)
+
+
+def pair_by_names(project, mapping):
+    """Point pages that carry text at their textless twin, decided by name.
+
+    CG sets ship the same drawing twice, and the reliable evidence is the
+    filename, not the pixels: `..._t00001` is the printed copy of `..._n00001`.
+    Pixel similarity was measured and rejected - inside a single-scene CG set
+    every clean page looks like every printed page (true pair MAD p50 18.3 vs
+    best false candidate 19.2), so an image-based rule would happily typeset one
+    page's dialogue onto another page's drawing.
+
+    Pairing therefore requires an explicit `t<n>` / `n<n>` marker with the same
+    number, plus identical pixel size. Anything else keeps the normal
+    erase path.
+    """
+    entries = {item["local"]: item["entry"] for item in mapping}
+    texted, clean = [], []
+    for page in project["pages"]:
+        entry = entries.get(page["image"], "")
+        if _page_has_text(page):
+            texted.append((page, entry))
+        elif _CLEAN_MARK.search(entry):
+            clean.append((page, entry))
+
+    by_number = {}
+    for page, entry in clean:
+        by_number.setdefault(_CLEAN_MARK.search(entry).group(1), []).append(page)
+
+    used = set()
+    paired = 0
+    for page, entry in texted:
+        marker = _TEXT_MARK.search(entry)
+        if not marker:
+            continue
+        for twin in by_number.get(marker.group(1), []):
+            if twin["page"] in used:
+                continue
+            if (twin["width"], twin["height"]) != (page["width"], page["height"]):
+                continue
+            page["clean_source"] = twin["image"]
+            used.add(twin["page"])
+            paired += 1
+            break
+    return paired
 
 
 def do_extract(input_dir, cfg, backend, client=None):
@@ -156,19 +218,51 @@ def _save_image(canvas, dest, fmt, src_image_path):
         canvas.save(dest)
 
 
+def _page_has_text(page):
+    """True if OCR found any text on this page.
+
+    Pages with no detected text (clean duplicates are common in CG sets) carry
+    nothing to erase or typeset, so they must be passed through untouched: a
+    decode/encode round trip would only add JPEG generation loss.
+    """
+    for block in page["blocks"]:
+        if (block.get("ocr") or "").strip():
+            return True
+    return False
+
+
 def do_render(project, input_dir, out_dir, cfg):
     from .config import find_cjk_font
     font_path = find_cjk_font(cfg.get("font") or None)
     os.makedirs(out_dir, exist_ok=True)
     output_format = cfg.get("output_format", "png").lower()
     keep_ext = cfg.get("keep_ext", False)
+    passed_through = 0
+    paired = 0
     for page in project["pages"]:
         fmt = output_format
         if keep_ext:
             fmt = os.path.splitext(page["image"])[1].lstrip(".").lower() or "png"
+        normalised = "jpg" if fmt in ("jpg", "jpeg") else fmt
         src = os.path.join(input_dir, page["image"])
         clean = os.path.splitext(src)[0] + ".clean.png"
-        if os.path.exists(clean):
+        src_fmt = os.path.splitext(src)[1].lstrip(".").lower()
+        if (normalised == ("jpg" if src_fmt in ("jpg", "jpeg") else src_fmt)
+                and not os.path.exists(clean) and not _page_has_text(page)):
+            stem = os.path.splitext(page["image"])[0]
+            shutil.copyfile(src, os.path.join(out_dir, stem + "." + normalised))
+            passed_through += 1
+            continue
+        clean_src = page.get("clean_source")
+        if clean_src:
+            # Typeset onto the textless twin: no erase, no artifacts. The twin is
+            # only ever set when the detector found no text on it and the drawing
+            # matches, so this cannot swap one page's art for another's.
+            with Image.open(os.path.join(input_dir, clean_src)) as img:
+                canvas = render.render_page(img.convert("RGB"), page, cfg, font_path,
+                                            erase=False)
+            paired += 1
+        elif os.path.exists(clean):
             with Image.open(clean) as img:
                 canvas = render.render_page(img.convert("RGB"), page, cfg, font_path, erase=False)
         else:
@@ -177,4 +271,10 @@ def do_render(project, input_dir, out_dir, cfg):
         stem = os.path.splitext(page["image"])[0]
         dest = os.path.join(out_dir, stem + "." + ("jpg" if fmt in ("jpg", "jpeg") else fmt))
         _save_image(canvas, dest, fmt, src)
+    if passed_through:
+        print("render: %d page(s) had no text and were passed through untouched"
+              % passed_through)
+    if paired:
+        print("render: %d page(s) were typeset onto their textless twin (no inpainting)"
+              % paired)
     return out_dir
