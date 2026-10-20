@@ -218,8 +218,17 @@ When the user gives you `api_base` / `ocr_url`, put them in `config.json` and us
 - **Never send a long silent request.** Stream LLM responses and retry transient
   drops in both the LLM and the OCR client; a non-streaming request is silent
   during generation and the host's port forward drops it after ~15 s.
-- Prefer hosts that already hold the image (Docker Hub speed is per host); if a
-  pull will not finish in ~15 minutes, destroy and switch; blacklist slow hosts.
+- Prefer hosts that already hold the image. **A pull is not billed** — only
+  storage is charged until the instance is `running` — so a slow pull costs
+  wall-clock, not money. Never kill a pulling host for being slow; switch only on
+  a persistent `Retrying` storm, or on `exited` / `unknown` / `offline`.
+  `status_msg` carries per-layer pull progress; that is the only rate signal.
+- **SSH is not required.** `vastai logs <id>` and `vastai execute <id> "<cmd>"`
+  both go through the API. sshd lives inside the container, so a refused SSH
+  during the pull means nothing. Use `tools/monitor.py` for GPU/network numbers.
+- Any run longer than about an hour needs a **dead-man switch** armed at boot
+  (heartbeat → `stop`, key scoped to that instance id). Your own link is a single
+  point of failure.
 - Run `deploy/net_check.sh` within 5 minutes of boot; on `NET_BAD` destroy and
   switch machines — do not debug a bad host.
 - Three gates before a batch: `/v1/models` returns a model → single-sentence test
@@ -253,6 +262,8 @@ When the user gives you `api_base` / `ocr_url`, put them in `config.json` and us
 2) tools/rent_and_run.py --yes --image <tag> --tag <tag> --run <pages>...
                                         (rent one machine, MEASURE its pull,
                                          gate, run, verify, tear down)
+   ...or, when the batch has archives of equal length (page count is not an
+   identity), tools/run_list.py --manifest batch.json --outdir <folder>
 3) tools/verify_batch.py --dir .        (page count/order/dimensions/coverage)
 4) tools/audit_sheets.py --dir .        (contact sheets: a human should glance)
 5) tools/collect.py --dir . --dest ComicsZHTW

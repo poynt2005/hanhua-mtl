@@ -112,6 +112,13 @@ Plus two human errors:
 ---
 
 | V68 | a rented host's **IP address was written into a tracked document** | this repository is public. The address is not a credential, but it is infrastructure detail, the project rules forbid IPs in tracked files, and it survives in git history even after the line is edited | record a host by its **behaviour** ("a host that already held the image"), never by its address; keep `config.json`, `vast_blacklist.txt`, `vast_current.txt` and the ssh keys gitignored; scan tracked files before pushing (`git grep -nE '[0-9]{1,3}(\.[0-9]{1,3}){3}'`) |
+| V69 | a `loading` instance was destroyed as "a slow pull", twice | **image pull is not billed** - only storage is charged until `actual_status` reaches `running`. Killing a pulling host therefore saves no money and throws away the download | never kill a `loading` host for being slow. Give up only on a persistent `Retrying` storm, or on `exited` / `unknown` / `offline`, which can never become `running` |
+| V70 | the "Mbps" badge in the web console was read as live traffic | it is the offer's **advertised** `inet_up` / `inet_down` (shared). The renter API exposes **no per-instance byte counter**: statically scanning the console bundle (3 MB, 121 chunks) finds no `net_rx` / `net_tx` / `traffic` / `throughput` literal, and `NetworkColumn` renders `e.inet_up` / `e.inet_down` straight off the offer. Live metrics pages exist only for hosts/admins | for pull rate use the per-layer events in `status_msg` (see `tools/pull_watch.py`); after boot use `tools/monitor.py`, which reads `/proc/net/dev` through `vastai execute` |
+| V71 | a healthy machine was declared unreachable because SSH was refused | sshd runs **inside** the container, so it refuses connections for the whole image pull, and a normal boot does not need it at all | use `vastai logs` and `vastai execute` - both go through the API. Keep SSH for interactive debugging only |
+| V72 | an unattended run depended on the operator's home link | when that link dropped, the machine kept billing and could not be stopped or inspected; the operator had to kill it by hand | install a **dead-man switch** at boot: no heartbeat for N minutes → `stop`. Give it a key scoped to that one instance id (see V73) |
+| V73 | a scoped API key is still account-wide unless constrained | a key with `instance_write` can create and destroy *any* instance of the account, so putting one on a rented machine hands the host the whole account | constrain the key to the instance: `{"api": {"instance_write": {"api.instance.destroy": {"constraints": {"id": {"eq": <id>}}}}}}`. The constraint needs the id, so create the key right after the instance exists and deliver it with `execute` |
+| V74 | a real 18.8 GB image looked like an empty one | the Hub tag list reports the **OCI index** size (`0.1 MB`, `full_size 86923`) for a multi-arch tag whose amd64 child is 18.8 GB | verify a tag through the registry manifest (an `amd64` child manifest must exist), not through the Hub's `full_size` |
+| V75 | the "typeset onto the clean twin" idea was almost automated from pixels | in a CG set the whole archive is one drawing, so **every** clean page resembles **every** printed page: true-pair MAD p50 18.3 vs best false candidate 19.2 (24-page set), 10.7 vs 12.1 (221-page set). The distributions overlap, so the best-scoring "twin" is often a different page | pair only on evidence that cannot be coincidence: an explicit `_t<n>` / `_n<n>` marker with the same number, plus identical pixel size. Measured 109/109 correct on the series that uses markers; everything else keeps the erase path. A missed pair costs nothing, a wrong pair silently degrades a page |
 
 ## 3. Hard rules
 
@@ -175,10 +182,13 @@ Plus two human errors:
     the machine is provably unusable (see R7.5 / the pull watchdog).
 
 **R9 Pick hosts that can actually pull**
-28. Docker Hub throughput is **per host**. Measure the pull: if the image is not
-    down within ~15 minutes, destroy and switch (a warm-cached host can boot the
-    same 15 GB image in ~3 minutes).
-29. Prefer hosts that already hold the image; blacklist hosts that pulled slowly.
+28. Docker Hub throughput is **per host**, and **pulling is not billed** (storage
+    only, until the instance is `running`). So a slow pull costs wall-clock, not
+    money: measure it, but do not destroy a pull in progress for being slow.
+    Switch only when the pull is provably dead (`Retrying` storm) or the status is
+    `exited` / `unknown` / `offline`, which can never become `running`.
+29. Prefer hosts that already hold the image; blacklist hosts that kept retrying
+    or died during the pull.
 
 **R10 Make transports survive and failures visible**
 30. **Never send a long silent request.** A non-streaming completion leaves the
@@ -200,6 +210,21 @@ Plus two human errors:
     and the ssh keys gitignored, and scan the tracked files before pushing:
     `git grep -nE '[0-9]{1,3}(\.[0-9]{1,3}){3}'` must return only `127.0.0.1`
     and `0.0.0.0`.
+
+**R12 Unattended runs need a dead-man switch**
+34. Any run longer than about an hour must assume the operator's link can vanish.
+    Arm a watchdog **inside the container at boot**, before the first heartbeat
+    is needed, that stops the instance once the heartbeat is older than N minutes.
+35. The watchdog must use a key **constrained to that instance id** (V73), and it
+    must `stop`, not `destroy`: stopping costs storage only and loses nothing.
+36. Refresh the heartbeat from the pipeline itself, and log every refresh, so a
+    dead-man firing can be explained afterwards instead of guessed at.
+
+**R13 Do not trade a measured pipeline for an unmeasured speedup**
+37. Concurrency multiplies every failure this project already paid for -
+    truncated context, model reloads, translations landing on the wrong page. Add
+    throughput with *machines* first; change the pipeline only against a measured
+    baseline, with a per-page line-count check that fails loudly.
 
 ## Violations
 
