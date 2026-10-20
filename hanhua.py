@@ -36,6 +36,19 @@ def _apply_overrides(cfg, args):
         cfg["timeout"] = args.timeout
     if getattr(args, "glossary", None):
         cfg["glossary_file"] = args.glossary
+    spec = getattr(args, "skip_pages", "")
+    if spec:
+        ranges = []
+        for part in str(spec).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                first, _, last = part.partition("-")
+                ranges.append([int(first), int(last)])
+            else:
+                ranges.append([int(part), int(part)])
+        cfg["skip_pages"] = ranges
     return cfg
 
 
@@ -412,6 +425,8 @@ def build_parser():
                    help="abort if the glossary is inconsistent (default: warn and continue)")
     a.add_argument("--keep-work", dest="keep_work", action="store_true",
                    help="keep the temp work dir even on success")
+    a.add_argument("--skip-pages", dest="skip_pages", default="",
+                   help="page ranges to leave untouched (textless copies), e.g. 13-24,40-52")
     add_common(a)
     a.set_defaults(func=cmd_auto)
 

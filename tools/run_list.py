@@ -94,7 +94,7 @@ def verify(archive, outdir=None):
 
 
 def run_one(archive, config, python_exe, outdir=None, glossary=None, auto_terms=False,
-            ocr="http", inpaint="lama"):
+            ocr="http", inpaint="lama", skip_pages=""):
     out = output_of(archive, outdir)
     if os.path.exists(out) and verify(archive, outdir):
         say("already done: %s" % os.path.basename(out)[:60])
@@ -109,6 +109,8 @@ def run_one(archive, config, python_exe, outdir=None, glossary=None, auto_terms=
         cmd += ["--glossary", glossary]
     elif auto_terms:
         cmd += ["--auto-terms"]
+    if skip_pages:
+        cmd += ["--skip-pages", skip_pages]
     t0 = time.time()
     rc = subprocess.run(cmd, cwd=REPO).returncode
     secs = time.time() - t0
@@ -160,7 +162,7 @@ def main():
     for entry in archives:
         ok, record = run_one(entry["archive"], args.config, args.python, outdir,
                              entry.get("glossary"), bool(entry.get("auto_terms")),
-                             args.ocr, args.inpaint)
+                             args.ocr, args.inpaint, entry.get("skip_pages", ""))
         if record:
             with open(args.log, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
