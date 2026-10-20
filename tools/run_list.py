@@ -93,13 +93,58 @@ def verify(archive, outdir=None):
     return ok
 
 
+def reset_services(cfg, ssh_host, ssh_port, ssh_key, log=print):
+    """Restart the inference services so the GPU starts each archive clean.
+
+    The OCR service's VRAM grows over a long session (0.4 GB at boot, 12 GB after
+    a few archives) and never gives it back. With a 14B model resident that
+    oversubscribes a 24 GB card: generation falls back to host memory and pages
+    take 60-70 s instead of 16. Killing both services between archives returns
+    the card to a known state; the start script restarts the OCR server by
+    itself and ollama reloads the model on the first request.
+    """
+    import urllib.request
+
+    ocr_url = cfg.get("ocr_url") or ""
+    host_port = ocr_url.split("//")[-1].split("/")[0]
+    ocr_host, _, ocr_port = host_port.partition(":")
+    if not ocr_host or not ocr_port:
+        return False
+
+    known_hosts = "NUL" if os.name == "nt" else "/dev/null"
+    ssh = ["ssh", "-i", ssh_key, "-p", str(ssh_port),
+           "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + known_hosts,
+           "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "root@" + ssh_host,
+           "pkill -f ocr_server.py; pkill -f llama-server; sleep 3; echo reset"]
+    res = subprocess.run(ssh, capture_output=True, text=True)
+    if res.returncode != 0:
+        log("reset: ssh failed (%s)" % (res.stderr or "").strip()[:80])
+        return False
+
+    health = "http://%s:%s/health" % (ocr_host, ocr_port)
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(health, timeout=5) as resp:
+                if resp.status == 200:
+                    log("reset: services back up")
+                    return True
+        except Exception:  # noqa: BLE001 - still loading
+            pass
+        time.sleep(5)
+    log("reset: OCR did not come back within 180s")
+    return False
+
+
 def run_one(archive, config, python_exe, outdir=None, glossary=None, auto_terms=False,
-            ocr="http", inpaint="lama", skip_pages=""):
+            ocr="http", inpaint="lama", skip_pages="", reset=None):
     out = output_of(archive, outdir)
     if os.path.exists(out) and verify(archive, outdir):
         say("already done: %s" % os.path.basename(out)[:60])
         return True, None
     pages_n = len(pages(archive))
+    if reset:
+        reset()
     say("RUN %d pages: %s" % (pages_n, os.path.basename(archive)[:60]))
     cmd = [python_exe, os.path.join(REPO, "hanhua.py"), "auto",
            "-i", archive, "-o", out,
@@ -139,6 +184,13 @@ def main():
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--ocr", default="http", help="ocr backend passed to auto (http on the GPU box)")
     ap.add_argument("--inpaint", default="lama", help="inpaint backend passed to auto")
+    ap.add_argument("--reset-gpu", action="store_true",
+                    help="restart the OCR service and the model between archives "
+                         "(its VRAM never shrinks on its own)")
+    ap.add_argument("--ssh-host", help="ssh host for --reset-gpu (the instance, not the proxy)")
+    ap.add_argument("--ssh-port", type=int, help="ssh port for --reset-gpu")
+    ap.add_argument("--ssh-key", default=os.path.join(REPO, "vast_ssh"),
+                    help="ssh key for --reset-gpu")
     ap.add_argument("--limit", type=int, default=0, help="stop after N archives (for a pilot)")
     ap.add_argument("--keep-going", action="store_true", help="continue after a failed archive")
     ap.add_argument("--destroy", action="store_true",
@@ -158,11 +210,22 @@ def main():
     if outdir:
         os.makedirs(outdir, exist_ok=True)
 
+    reset = None
+    if args.reset_gpu:
+        if not args.ssh_host or not args.ssh_port:
+            say("--reset-gpu needs --ssh-host and --ssh-port; continuing without reset")
+        else:
+            with open(args.config, encoding="utf-8") as fh:
+                base_cfg = json.load(fh)
+            reset = (lambda: reset_services(base_cfg, args.ssh_host, args.ssh_port,
+                                            args.ssh_key, log=say))
+
     done = 0
     for entry in archives:
         ok, record = run_one(entry["archive"], args.config, args.python, outdir,
                              entry.get("glossary"), bool(entry.get("auto_terms")),
-                             args.ocr, args.inpaint, entry.get("skip_pages", ""))
+                             args.ocr, args.inpaint, entry.get("skip_pages", ""),
+                             reset)
         if record:
             with open(args.log, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
