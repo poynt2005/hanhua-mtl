@@ -66,7 +66,9 @@ experiment):
 | Fix | Why it was required | Evidence |
 |---|---|---|
 | `list_images` now collects **every** page extension | `pattern` was a single glob, so an archive holding `.jpg` pages plus a `.webp` cover silently lost the webp page and then aborted repack with `translated page missing` | 3 of 43 archives affected; after the fix 21/21 and 134/134 pages round-trip with identical names, order and dimensions |
-| textless pages are **copied, not rendered** | without it, ~26–50 % of pages were decoded and re-encoded for nothing | byte-identical output confirmed on a real page |
+| textless pages are **copied, not rendered** | without it, ~26–50 % of pages were decoded and re-encoded for nothing | 12 of 24 pages byte-identical to the source, confirmed by hash |
+| duplicate boxes for one column are **merged** | on text printed straight onto the art the detector returns a tight box and a loose box for the same column; translating and drawing both put two sentences on top of each other and the page became an unreadable smear | 91 blocks → 59 after merging on one 24-page archive; the re-render is readable and each column carries one continuous sentence |
+| the translation model is **unloaded before OCR** | a 14B Q6_K holds 13.8 GB of a 23.6 GB card, leaving too little for LaMa | remote VRAM dropped from 22.9 GB to 3.0 GB during the detection pass |
 
 ## 4. Cost model
 

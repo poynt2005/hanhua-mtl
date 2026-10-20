@@ -44,7 +44,7 @@ def _api(key, method, path, payload=None):
 
 def run_command(key, iid, command, wait=25):
     """Queue one command and return its output (empty string if it is not ready)."""
-    reply = _api(key, "PUT", "/api/v0/instances/command/%s" % iid, {"command": command})
+    reply = _api(key, "PUT", "/api/v0/instances/command/%s/" % iid, {"command": command})
     url = reply.get("result_url")
     if not url:
         return ""
