@@ -80,10 +80,128 @@ def pair_by_names(project, mapping):
             if (twin["width"], twin["height"]) != (page["width"], page["height"]):
                 continue
             page["clean_source"] = twin["image"]
+            # The twin is a textless copy by name, so whatever the detector
+            # thought it saw on it is noise: leave that page untouched.
+            twin["blocks"] = []
             used.add(twin["page"])
             paired += 1
             break
     return paired
+
+
+MAX_BLOCK_AREA = 0.20
+
+
+def _drop_implausible_blocks(page):
+    """Remove boxes that cannot be a speech bubble.
+
+    On clean CG art the detector occasionally fires on texture and produces a
+    box covering a quarter to most of the page; manga-ocr then hallucinates a
+    short line inside it. Typesetting that fills the box with page-sized
+    characters - it destroyed half of one archive before this filter existed.
+    Real bubbles are a small fraction of the page, so anything above
+    MAX_BLOCK_AREA is dropped rather than trusted.
+    """
+    total = float(page["width"] * page["height"]) or 1.0
+    keep = []
+    for block in page["blocks"]:
+        x0, y0, x1, y1 = block["bbox"]
+        if (x1 - x0) * (y1 - y0) / total > MAX_BLOCK_AREA:
+            continue
+        keep.append(block)
+    page["blocks"] = keep
+
+
+def _overlap_ratio(first, second):
+    ax0, ay0, ax1, ay1 = first
+    bx0, by0, bx1, by1 = second
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0.0
+    inter = float((ix1 - ix0) * (iy1 - iy0))
+    smaller = min((ax1 - ax0) * (ay1 - ay0), (bx1 - bx0) * (by1 - by0))
+    return inter / smaller if smaller else 0.0
+
+
+def merge_overlapping_blocks(page, threshold=0.55):
+    """Merge boxes that describe the same run of text.
+
+    On art with text printed straight onto it, the detector often returns two
+    boxes for one vertical column: a tight one and a loose one that contains it.
+    Translating both and drawing both puts two different sentences on top of
+    each other - the delivered page becomes an unreadable smear. Merging them
+    keeps one block per column, with the whole column's text in reading order.
+    """
+    blocks = page["blocks"]
+    if len(blocks) < 2:
+        return 0
+    parent = list(range(len(blocks)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    merged = 0
+    for i in range(len(blocks)):
+        for j in range(i + 1, len(blocks)):
+            if _overlap_ratio(blocks[i]["bbox"], blocks[j]["bbox"]) > threshold:
+                root_i, root_j = find(i), find(j)
+                if root_i != root_j:
+                    parent[root_j] = root_i
+                    merged += 1
+    if not merged:
+        return 0
+
+    groups = {}
+    for i, block in enumerate(blocks):
+        groups.setdefault(find(i), []).append(block)
+
+    rebuilt = []
+    for members in groups.values():
+        if len(members) == 1:
+            rebuilt.append(members[0])
+            continue
+        ordered = reading_order(members)
+        xs0 = min(b["bbox"][0] for b in members)
+        ys0 = min(b["bbox"][1] for b in members)
+        xs1 = max(b["bbox"][2] for b in members)
+        ys1 = max(b["bbox"][3] for b in members)
+        head = ordered[0]
+        rebuilt.append({
+            "id": head["id"],
+            "bbox": [xs0, ys0, xs1, ys1],
+            "direction": head.get("direction", "auto"),
+            "type": head.get("type", "speech"),
+            "ocr": "".join((b.get("ocr") or "") for b in ordered),
+            "translation": "".join((b.get("translation") or "") for b in ordered),
+        })
+    rebuilt.sort(key=lambda b: (b["bbox"][1], -b["bbox"][0]))
+    page["blocks"] = rebuilt
+    return merged
+
+
+def _clear_listed_pages(project, spec):
+    """Blank pages listed explicitly as textless copies in the config.
+
+    Automatic detection of clean copies was tried and rejected: on a CG set the
+    detector's OCR volume on a clean page can sit close enough to a sparse real
+    page that any threshold either sprays text on art or leaves Japanese behind.
+    An explicit range per archive is unambiguous and costs nothing to apply.
+    """
+    cleared = 0
+    for item in spec or []:
+        try:
+            first, last = int(item[0]), int(item[1])
+        except (TypeError, IndexError, ValueError):
+            continue
+        for page in project["pages"]:
+            if first <= page["page"] <= last and page["blocks"]:
+                page["blocks"] = []
+                cleared += 1
+    return cleared
 
 
 def do_extract(input_dir, cfg, backend, client=None):
@@ -112,6 +230,13 @@ def do_extract(input_dir, cfg, backend, client=None):
             )
             blocks.append(block)
         project["pages"].append(new_page(index, os.path.basename(path), width, height, blocks))
+    for page in project["pages"]:
+        _drop_implausible_blocks(page)
+        merge_overlapping_blocks(page)
+    cleared = _clear_listed_pages(project, cfg.get("skip_pages"))
+    if cleared:
+        print("extract: %d page(s) are listed as textless copies; left untouched"
+              % cleared)
     return project
 
 
@@ -248,7 +373,11 @@ def do_render(project, input_dir, out_dir, cfg):
         clean = os.path.splitext(src)[0] + ".clean.png"
         src_fmt = os.path.splitext(src)[1].lstrip(".").lower()
         if (normalised == ("jpg" if src_fmt in ("jpg", "jpeg") else src_fmt)
-                and not os.path.exists(clean) and not _page_has_text(page)):
+                and not _page_has_text(page)):
+            # A page with no text is delivered as the original file: the clean
+            # copy (if the server made one) is the detector's guess at what to
+            # erase, and on a textless page that guess is exactly the damage we
+            # are trying to avoid.
             stem = os.path.splitext(page["image"])[0]
             shutil.copyfile(src, os.path.join(out_dir, stem + "." + normalised))
             passed_through += 1

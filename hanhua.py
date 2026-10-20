@@ -189,6 +189,9 @@ def cmd_auto(args):
     ok = False
     try:
         mapping = archive.extract(args.input, raw)
+        if cfg.get("unload_llm_before_ocr"):
+            if providers.unload_model(cfg):
+                print("ocr: released the translation model's VRAM for inpainting")
         project = pipeline.do_extract(raw, cfg, args.ocr, client)
         paired = pipeline.pair_by_names(project, mapping)
         if paired:
@@ -294,6 +297,9 @@ def cmd_book(args):
     out = os.path.join(workdir, "out")
     try:
         mapping = archive.extract(args.input, raw)
+        if cfg.get("unload_llm_before_ocr"):
+            if providers.unload_model(cfg):
+                print("ocr: released the translation model's VRAM for inpainting")
         project = pipeline.do_extract(raw, cfg, args.ocr, client)
         paired = pipeline.pair_by_names(project, mapping)
         if paired:

@@ -385,6 +385,34 @@ def _translate_sakura(client, model, pairs, glossary=None, system=None, history=
     return {str(pair["id"]): out_lines[i] for i, pair in enumerate(pairs)}
 
 
+def unload_model(cfg, timeout=30):
+    """Free the translation model's VRAM before OCR.
+
+    ollama keeps a model resident forever (OLLAMA_KEEP_ALIVE=-1). A 14B Q6_K
+    holds ~13.8 GB, which leaves too little for LaMa on a very large page: a
+    34 MP scan needs ~8.3 GB and the server answers with CUDA out of memory,
+    returning blocks but no cleaned page - and the client then falls back to
+    blurring the text, which is not an acceptable delivery.
+
+    Unloading before the detection pass gives inpainting the whole card; the
+    model reloads on the next translation request.
+    """
+    base = (cfg.get("api_base") or "").rstrip("/")
+    if not base:
+        return False
+    if base.endswith("/v1"):
+        base = base[:-3]
+    body = json.dumps({"model": cfg.get("text_model", ""), "keep_alive": 0}).encode()
+    req = urllib.request.Request(base + "/api/generate", data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read()
+        return True
+    except Exception:  # noqa: BLE001 - a failed unload only costs VRAM headroom
+        return False
+
+
 def translate_batch(client, model, pairs, glossary=None, target_lang="zh-TW",
                     profile="openai", system=None, history=None):
     if profile == "sakura":
