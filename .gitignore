@@ -38,3 +38,7 @@ llm_handoff_example/
 vast_blacklist.txt
 
 vast_current.txt
+
+# runtime heartbeat / guard artifacts (local only)
+batch_heartbeat.txt
+guard.log
