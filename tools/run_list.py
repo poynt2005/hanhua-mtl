@@ -37,6 +37,18 @@ def say(msg):
     print("[run %s] %s" % (time.strftime("%H:%M:%S"), msg), flush=True)
 
 
+def touch_heartbeat(path):
+    """Tell tools/heartbeat_guard.py that the batch is still making progress."""
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("%d\n" % int(time.time()))
+        os.utime(path, None)
+    except OSError:
+        pass
+
+
 def pages(path):
     with zipfile.ZipFile(path) as zf:
         return [n for n in zf.namelist()
@@ -94,14 +106,12 @@ def verify(archive, outdir=None):
 
 
 def reset_services(cfg, ssh_host, ssh_port, ssh_key, log=print):
-    """Restart the inference services so the GPU starts each archive clean.
+    """Make sure the OCR service is alive before an archive starts.
 
-    The OCR service's VRAM grows over a long session (0.4 GB at boot, 12 GB after
-    a few archives) and never gives it back. With a 14B model resident that
-    oversubscribes a 24 GB card: generation falls back to host memory and pages
-    take 60-70 s instead of 16. Killing both services between archives returns
-    the card to a known state; the start script restarts the OCR server by
-    itself and ollama reloads the model on the first request.
+    The OCR service's VRAM grows over a session (0.4 GB at boot, 17 GB after 38
+    large pages) and never gives it back, so the pipeline stops it after every
+    extraction and restarts it here. That is why this both starts the restart
+    loop when it is missing and kills the worker.
     """
     import urllib.request
 
@@ -112,14 +122,11 @@ def reset_services(cfg, ssh_host, ssh_port, ssh_key, log=print):
         return False
 
     known_hosts = "NUL" if os.name == "nt" else "/dev/null"
-    ssh = ["ssh", "-i", ssh_key, "-p", str(ssh_port),
-           "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + known_hosts,
-           "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "root@" + ssh_host,
-           "pkill -f ocr_server.py; pkill -f llama-server; sleep 3; echo reset"]
-    res = subprocess.run(ssh, capture_output=True, text=True)
-    if res.returncode != 0:
-        log("reset: ssh failed (%s)" % (res.stderr or "").strip()[:80])
-        return False
+    from mth import remote
+
+    remote.write_loop(ssh_host, ssh_port, ssh_key)
+    remote.stop_ocr(ssh_host, ssh_port, ssh_key)
+    remote.start_ocr(ssh_host, ssh_port, ssh_key)
 
     health = "http://%s:%s/health" % (ocr_host, ocr_port)
     deadline = time.time() + 180
@@ -136,8 +143,29 @@ def reset_services(cfg, ssh_host, ssh_port, ssh_key, log=print):
     return False
 
 
+def stop_ocr(ssh_host, ssh_port, ssh_key, log=print):
+    """Stop the OCR service so the translation model can have the GPU.
+
+    After extraction the service holds most of the card; loading the 14B model on
+    top of that does not fit, and the run stalls on a request that can never be
+    served. Called between the extract and translate stages.
+    """
+    known_hosts = "NUL" if os.name == "nt" else "/dev/null"
+    remote = ("pkill -f 'PORT=808[0] python /root/ocr_server.py'; sleep 1; "
+              "pkill -x -f 'python /root/ocr_server.py'; sleep 3; "
+              "nvidia-smi --query-gpu=memory.used --format=csv,noheader")
+    ssh = ["ssh", "-i", ssh_key, "-p", str(ssh_port),
+           "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + known_hosts,
+           "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "root@" + ssh_host,
+           remote]
+    res = subprocess.run(ssh, capture_output=True, text=True)
+    log("ocr stopped after extract (vram now %s)" % (res.stdout or "").strip()[:20])
+    return res.returncode == 0
+
+
 def run_one(archive, config, python_exe, outdir=None, glossary=None, auto_terms=False,
-            ocr="http", inpaint="lama", skip_pages="", reset=None):
+            ocr="http", inpaint="lama", skip_pages="", reset=None,
+            reset_target=None, ssh_key=None, heartbeat=None):
     out = output_of(archive, outdir)
     if os.path.exists(out) and verify(archive, outdir):
         say("already done: %s" % os.path.basename(out)[:60])
@@ -157,7 +185,17 @@ def run_one(archive, config, python_exe, outdir=None, glossary=None, auto_terms=
     if skip_pages:
         cmd += ["--skip-pages", skip_pages]
     t0 = time.time()
-    rc = subprocess.run(cmd, cwd=REPO).returncode
+    env = os.environ.copy()
+    if reset_target:
+        env["MTH_OCR_STOP_SSH"] = reset_target
+        env["MTH_SSH_KEY"] = ssh_key or os.path.join(REPO, "vast_ssh")
+    proc = subprocess.Popen(cmd, cwd=REPO, env=env)
+    # Keep the heartbeat moving while the archive runs: an archive can take the
+    # better part of an hour, and the guard must not mistake that for a dead run.
+    while proc.poll() is None:
+        touch_heartbeat(heartbeat)
+        time.sleep(30)
+    rc = proc.returncode
     secs = time.time() - t0
     if rc != 0:
         say("FAILED rc=%d after %.0fs - MACHINE KEPT for debugging" % (rc, secs))
@@ -191,6 +229,9 @@ def main():
     ap.add_argument("--ssh-port", type=int, help="ssh port for --reset-gpu")
     ap.add_argument("--ssh-key", default=os.path.join(REPO, "vast_ssh"),
                     help="ssh key for --reset-gpu")
+    ap.add_argument("--heartbeat", default=os.path.join(REPO, "batch_heartbeat.txt"),
+                    help="file touched after every archive; tools/heartbeat_guard.py "
+                         "destroys the machine when it stops moving")
     ap.add_argument("--limit", type=int, default=0, help="stop after N archives (for a pilot)")
     ap.add_argument("--keep-going", action="store_true", help="continue after a failed archive")
     ap.add_argument("--destroy", action="store_true",
@@ -211,6 +252,7 @@ def main():
         os.makedirs(outdir, exist_ok=True)
 
     reset = None
+    reset_target = None
     if args.reset_gpu:
         if not args.ssh_host or not args.ssh_port:
             say("--reset-gpu needs --ssh-host and --ssh-port; continuing without reset")
@@ -219,13 +261,16 @@ def main():
                 base_cfg = json.load(fh)
             reset = (lambda: reset_services(base_cfg, args.ssh_host, args.ssh_port,
                                             args.ssh_key, log=say))
+            reset_target = "%s:%s" % (args.ssh_host, args.ssh_port)
 
     done = 0
+    touch_heartbeat(args.heartbeat)
     for entry in archives:
         ok, record = run_one(entry["archive"], args.config, args.python, outdir,
                              entry.get("glossary"), bool(entry.get("auto_terms")),
                              args.ocr, args.inpaint, entry.get("skip_pages", ""),
-                             reset)
+                             reset, reset_target, args.ssh_key, args.heartbeat)
+        touch_heartbeat(args.heartbeat)
         if record:
             with open(args.log, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -241,6 +286,11 @@ def main():
     if done != len(archives):
         say("not everything verified - machine left running")
         return 4
+
+    try:
+        os.remove(args.heartbeat)
+    except OSError:
+        pass
 
     if not args.destroy:
         say("--destroy not given: machine left running on purpose")

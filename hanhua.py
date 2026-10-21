@@ -203,10 +203,24 @@ def cmd_auto(args):
     try:
         mapping = archive.extract(args.input, raw)
         if cfg.get("unload_llm_before_ocr"):
-            if providers.unload_model(cfg):
-                print("ocr: released the translation model's VRAM for inpainting")
+            # Reloading a 12 GB model costs minutes, so only release the card for
+            # archives that actually hold a page too big for LaMa to share it.
+            biggest = pipeline.largest_page_pixels(raw, mapping)
+            threshold = float(cfg.get("unload_llm_above_mp", 12)) * 1e6
+            if biggest > threshold:
+                if providers.unload_model(cfg):
+                    print("ocr: released the translation model's VRAM for inpainting "
+                          "(largest page %.1f MP)" % (biggest / 1e6))
         project = pipeline.do_extract(raw, cfg, args.ocr, client)
         paired = pipeline.pair_by_names(project, mapping)
+        stop_target = os.environ.get("MTH_OCR_STOP_SSH", "")
+        if stop_target:
+            from mth import remote as _remote
+            host, _, port = stop_target.partition(":")
+            ok, info = _remote.stop_ocr(host, port, os.environ.get("MTH_SSH_KEY", ""))
+            if ok:
+                print("ocr: stopped after extraction to free the GPU for translation "
+                      "(vram now %s)" % info)
         if paired:
             print("clean twin: %d page(s) will be typeset onto the textless copy "
                   "(no inpainting)" % paired)
@@ -311,10 +325,24 @@ def cmd_book(args):
     try:
         mapping = archive.extract(args.input, raw)
         if cfg.get("unload_llm_before_ocr"):
-            if providers.unload_model(cfg):
-                print("ocr: released the translation model's VRAM for inpainting")
+            # Reloading a 12 GB model costs minutes, so only release the card for
+            # archives that actually hold a page too big for LaMa to share it.
+            biggest = pipeline.largest_page_pixels(raw, mapping)
+            threshold = float(cfg.get("unload_llm_above_mp", 12)) * 1e6
+            if biggest > threshold:
+                if providers.unload_model(cfg):
+                    print("ocr: released the translation model's VRAM for inpainting "
+                          "(largest page %.1f MP)" % (biggest / 1e6))
         project = pipeline.do_extract(raw, cfg, args.ocr, client)
         paired = pipeline.pair_by_names(project, mapping)
+        stop_target = os.environ.get("MTH_OCR_STOP_SSH", "")
+        if stop_target:
+            from mth import remote as _remote
+            host, _, port = stop_target.partition(":")
+            ok, info = _remote.stop_ocr(host, port, os.environ.get("MTH_SSH_KEY", ""))
+            if ok:
+                print("ocr: stopped after extraction to free the GPU for translation "
+                      "(vram now %s)" % info)
         if paired:
             print("clean twin: %d page(s) will be typeset onto the textless copy "
                   "(no inpainting)" % paired)
