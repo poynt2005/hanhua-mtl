@@ -148,6 +148,30 @@ Marginal cost in steady state: **≈ $0.0008/page**. Session average including a
 mistakes: **≈ $0.0022/page**. The difference is the price of learning on a paid
 machine, and it is the reason the playbook now has V79-V82.
 
+### 6.1 Why the waste happened: one pattern, five times
+
+| error | root cause | countermeasure now in place |
+|---|---|---|
+| six hours of idle billing ($1.29) | no supervisor existed at that moment: guard and subagent were written the next morning, and the operator only wakes on a *completed* background command | scheduled `HanhuaGuard` + heartbeat refreshed every 30 s, tested end to end |
+| early phase at 35-60 s/page ($1.2) | the OCR service's VRAM growth was never measured; the card was silently oversubscribed | stop OCR after extraction, restart before the next archive, unload the model before detection |
+| killed a healthy run as "stuck" ($0.13) | judged on a chat latency probe that was queued behind the in-flight request (`-np 1`) | judge only on GPU utilisation, power draw and file writes |
+| "unload only for big pages" broke inpainting ($0.15) | a working configuration was changed mid-batch without re-validating | changes happen between runs, never during one |
+| `pkill` self-match, twice ($0.15) | the kill pattern also matched the shell and the restart loop sending it | dedicated loop script + `pkill -x -f` on the exact child |
+| venv shim read as "two runners", batch killed ($0.05) | counted processes instead of inspecting the chain | count chains, check the leaf's GPU/file activity before acting |
+| machine destroyed against instruction ($0.10) | teardown was treated as routine | teardown is an explicit, confirmed action |
+
+Five of the seven share one shape: **act on a single signal without measuring an
+independent one.** The durable fix is not "be more careful" - it is to make the
+decision rule mechanical: a batch is working if the GPU is drawing power and files
+are appearing; a machine is finished if the run log says verified; money stops
+when a heartbeat stops, not when someone notices.
+
+Cost compared with the first batch: that one measured ~$0.00064/page at
+$0.153/hr. This one runs at ~$0.0008/page, ~25 % higher, almost entirely because
+the spot price for a 24 GB card rose from ~$0.15 to ~$0.21-0.265/hr - GPU-hours per
+page are comparable. In other words the pipeline did not get slower; the market
+did.
+
 ## 7. Known open problems
 
 1. **Local API route.** From the operator machine, `console.vast.ai:443` times out
@@ -160,8 +184,25 @@ machine, and it is the reason the playbook now has V79-V82.
 3. **Clean-page detection** remains manual per archive (`skip_pages`).
 4. **Seven archives left**, ~2,100 pages, including a 381-page one.
 
-## 8. What an arriving agent should not do
+## 7.5 How to tell whether the batch is actually working
 
+The question came up repeatedly during the run and was answered wrongly twice.
+Use only these signals:
+
+| signal | healthy | what it means |
+|---|---|---|
+| GPU utilisation | 30-99 % while translating; short 0 % dips between pages | the model is generating |
+| GPU power draw | near the model's ceiling (~280 W on a 3090, ~118 W idle) | real matrix work, not memory shuffling |
+| newest file mtime in the work dir | within the last minute during OCR | pages are being detected and erased |
+| run log | a new `... -> verified` line per archive | an archive finished and passed verification |
+| heartbeat | refreshed within the last minute | the runner loop is alive |
+
+Do **not** use: process count (the venv shim doubles every script), a chat latency
+probe during a batch (it queues behind the in-flight request and measures queue
+time), the console's "Mbps" badge (advertised bandwidth, not traffic), or "it has
+been a while" (a 255-page archive legitimately takes ~70 minutes).
+
+## 8. What an arriving agent should not do
 * Do not rent before checking `deploy/VASTAI_PLAYBOOK.md` §3 and the current
   balance.
 * Do not kill a `loading` host for being slow; it is free.
