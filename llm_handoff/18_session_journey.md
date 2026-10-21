@@ -130,10 +130,12 @@ Two of these were rejected after measurement and are worth remembering:
    The command had already been sent when the instruction arrived. Nothing was
    lost except the rental, but it is the clearest example of why teardown must be
    an explicit, confirmed action.
-9. **The operator's route to `console.vast.ai` died** while the machine stayed
-   reachable. Balance checks and `vast down` failed; the batch was unaffected
-   because it talks to the machine directly. Workaround: run the API call **from
-   the rented machine** over ssh.
+8. **The operator's route to `console.vast.ai` died** while the machine stayed
+   reachable. The first answer - "we cannot check the balance or tear down" - was
+   wrong: `cloud.vast.ai` serves the same API on the same paths, so setting
+   `VAST_API_BASE=https://cloud.vast.ai` restored status, teardown and the guard.
+   The lesson is not that the network failed, it is that an unreachable host is
+   not the same thing as an unavailable service.
 
 ## 6. Cost, decomposed
 
@@ -175,10 +177,16 @@ did.
 ## 7. Known open problems
 
 1. **Local API route.** From the operator machine, `console.vast.ai:443` times out
-   while `cloud.vast.ai` and everything else works. Until it is fixed, balance
-   checks and teardown must go through the rented machine over ssh. The scheduled
-   guard is also blind during such an outage - it cannot destroy what it cannot
-   reach.
+   while everything else works. **This is not a blocker and must not be used as an
+   excuse.** `cloud.vast.ai` serves the *same* API on the same paths: user object,
+   v1 instance list, and teardown all answer normally (verified: status returned
+   the balance, `vast down` reached the destroy path, `/api/v1/instances/` returned
+   200). Point the tooling at it with `VAST_API_BASE=https://cloud.vast.ai`
+   (`mth/vast.py` honours it for both the REST calls and the CLI subprocess), and
+   set it in the user environment so the scheduled guard uses it too. Only if
+   *both* hosts are unreachable is the API genuinely down - and then the answer is
+   to run the call from the rented machine over ssh, not to give up on
+   supervision.
 2. **34.8 MP pages.** Need a 45-48 GB card, or an image that downscales for LaMa
    and composites back.
 3. **Clean-page detection** remains manual per archive (`skip_pages`).
