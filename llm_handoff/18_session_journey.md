@@ -130,7 +130,7 @@ Two of these were rejected after measurement and are worth remembering:
    The command had already been sent when the instruction arrived. Nothing was
    lost except the rental, but it is the clearest example of why teardown must be
    an explicit, confirmed action.
-8. **The operator's route to `console.vast.ai` died** while the machine stayed
+9. **The operator's route to `console.vast.ai` died** while the machine stayed
    reachable. The first answer - "we cannot check the balance or tear down" - was
    wrong: `cloud.vast.ai` serves the same API on the same paths, so setting
    `VAST_API_BASE=https://cloud.vast.ai` restored status, teardown and the guard.
