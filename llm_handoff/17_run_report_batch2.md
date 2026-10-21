@@ -85,6 +85,18 @@ run looks like: the early pages paid for the fixes.
 6. **The local runner is a single point of failure.** It was killed twice by the
    environment restarting; once the machine then billed for six hours unattended.
    Fixed with a heartbeat plus a scheduled guard that destroys a stale machine.
+
+   That six-hour gap deserves its own note, because the fix is not obvious from
+   the symptom. At the moment the runner died there was **no supervisor of any
+   kind**: the scheduled guard did not exist yet (it was written the next
+   morning), the monitoring subagent did not exist yet either, and the operator
+   was waiting for a "background command finished" notification - which a killed
+   process never sends, because it did not finish. Nothing was watching, so
+   nothing could notice; the machine was found six hours later only because the
+   user asked for a status report. The lesson is not "watch more carefully": an
+   operator, however attentive, is not a supervisor. Supervision has to be a
+   process that runs whether or not anyone is looking, and it has to be in place
+   *before* the batch starts.
 7. **Two "duplicate" `run_list` processes were not duplicates** - the venv's
    `python.exe` is a shim that re-execs the real interpreter, so every script
    appears twice in the process list. Acting on that observation killed a healthy
