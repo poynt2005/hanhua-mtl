@@ -11,7 +11,10 @@ import time
 import urllib.error
 import urllib.request
 
-BASE = "https://console.vast.ai"
+# The API lives on console.vast.ai, but cloud.vast.ai serves the same endpoints.
+# Override with VAST_API_BASE when the operator's route to one host is broken -
+# observed: console unreachable from one network while cloud answered normally.
+BASE = os.environ.get("VAST_API_BASE", "https://console.vast.ai")
 DEFAULT_IMAGE = "pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime"
 
 
@@ -23,7 +26,7 @@ def _cli():
 
 
 def _cli_run(key, args):
-    cmd = [_cli(), "--api-key", key] + args
+    cmd = [_cli(), "--api-key", key, "--url", BASE] + args
     proc = subprocess.run(cmd, capture_output=True, text=True,
                           encoding="utf-8", errors="replace")
     return proc.returncode, proc.stdout, proc.stderr
