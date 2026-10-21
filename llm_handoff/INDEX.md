@@ -27,6 +27,7 @@ agent needs to continue seamlessly from the current state.
 | 14 | `14_thrashing_postmortem.md` | **read before changing anything**: how this project repeatedly broke its own fixes, every regression, the anti-patterns, and the loop that works instead |
 | 15 | `15_run_log.md` | **the full session, attempt by attempt**: every wrong diagnosis and its cost, the batch, the model upgrade, the detection over-call, the infrastructure failures, and the final state |
 | 16 | `16_batch_operations.md` | **the second-batch runbook**: what the batch contains structurally, the clean-twin opportunity, the two pipeline fixes, the cost model, monitoring without SSH, and the approaches deliberately rejected |
+| 17 | `17_run_report_batch2.md` | **what actually happened executing that plan**: 31 archives delivered, measured seconds/page per archive size, where the money went, the eight failure modes met, the operator errors and their cost, and how to resume |
 
 ## Related documents (kept in place, not duplicated here)
 
