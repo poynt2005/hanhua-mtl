@@ -204,6 +204,19 @@ def _clear_listed_pages(project, spec):
     return cleared
 
 
+def largest_page_pixels(input_dir, mapping, limit=200):
+    """Biggest page area in the archive, from headers only (no decode)."""
+    biggest = 0
+    for item in mapping[:limit]:
+        try:
+            with Image.open(os.path.join(input_dir, item["local"])) as img:
+                width, height = img.size
+        except Exception:  # noqa: BLE001
+            continue
+        biggest = max(biggest, width * height)
+    return biggest
+
+
 def do_extract(input_dir, cfg, backend, client=None):
     project = new_project(cfg["source_lang"], cfg["target_lang"], os.path.basename(os.path.abspath(input_dir)))
     files = list_images(input_dir, cfg.get("pattern", "*.png"))
