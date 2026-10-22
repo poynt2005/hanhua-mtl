@@ -59,9 +59,13 @@ def pair_by_names(project, mapping):
     texted, clean = [], []
     for page in project["pages"]:
         entry = entries.get(page["image"], "")
-        if _page_has_text(page):
+        if _TEXT_MARK.search(entry):
             texted.append((page, entry))
         elif _CLEAN_MARK.search(entry):
+            # The marker is the evidence. Requiring the detector to agree as well
+            # defeated the whole mechanism: on clean art it invents boxes, the
+            # page then counts as "has text", is never paired, and gets
+            # translated and typeset - 67 of 109 clean pages in one archive.
             clean.append((page, entry))
 
     by_number = {}
