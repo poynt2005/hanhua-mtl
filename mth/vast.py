@@ -203,18 +203,28 @@ def instance_info(key, iid):
         return {}
 
 
-def wait_running(key, iid, timeout=1500, log=print):
+def wait_running(key, iid, timeout=1500, log=print, heartbeat=None):
     """Wait for the instance to run while logging image-pull progress.
 
     A large image has big layers that download for minutes with no status change,
     so we do NOT use a generic stall timeout. The only early give-up is a pull
     that is repeatedly *retrying* (a real failure).
+
+    `heartbeat` is a file path that is refreshed on every poll: a pull can outlast
+    the supervisor's idle limit, and without this the guard would destroy a
+    machine that is merely downloading.
     """
     start = time.time()
     last_msg = None
     retry_since = None
     info = {}
     while time.time() - start < timeout:
+        if heartbeat:
+            try:
+                with open(heartbeat, "a", encoding="utf-8") as hb:
+                    hb.write("%d\n" % int(time.time()))
+            except OSError:
+                pass
         info = instance_info(key, iid)
         if info.get("actual_status") == "running":
             return info
@@ -463,6 +473,17 @@ def up(key, workdir, deploy_dir, model=DEFAULT_MODEL, min_vram=24, min_down=200,
             log("create failed for offer %s (unavailable?) -> next" % offer.get("id"))
             continue
         tried += 1
+        # Refresh the guard's heartbeat the moment a machine exists. Without this
+        # a leftover heartbeat from a previous session looks "stale" to
+        # tools/heartbeat_guard.py, which then destroys the new instance before
+        # the batch has a chance to start - observed as machines vanishing
+        # seconds after creation.
+        try:
+            with open(os.path.join(workdir, "batch_heartbeat.txt"), "a",
+                      encoding="utf-8") as hb:
+                hb.write("%d\n" % int(time.time()))
+        except OSError:
+            pass
         try:
             log("instance %s created; waiting for running..." % iid)
             # A large image (18+ GB) can legitimately take 20-30 minutes on a
@@ -470,7 +491,8 @@ def up(key, workdir, deploy_dir, model=DEFAULT_MODEL, min_vram=24, min_down=200,
             # change - so the cap has to be generous. It only gives up early on a
             # pull that is repeatedly RETRYING. Prefer tools/rent_and_run.py,
             # which measures the rate and switches host properly.
-            info = wait_running(key, iid, timeout=2400, log=log)
+            info = wait_running(key, iid, timeout=2400, log=log,
+                             heartbeat=os.path.join(workdir, "batch_heartbeat.txt"))
             if info.get("actual_status") != "running":
                 destroy(key, iid)
                 failed_hosts.add(host_ip)
