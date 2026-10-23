@@ -11,11 +11,11 @@ page contents, no host addresses, no keys. For the per-archive numbers see
 
 | | |
 |---|---|
-| delivered + verified | **31 archives / ~4,080 pages** |
-| still to translate | **7 archives / ~2,100 pages** |
-| machines running | **0** (last one destroyed on request) |
-| spend for the batch | **~$9**, of which ~$3.2 was operator error |
-| operator's local API route to `console.vast.ai` | **broken** at the time of writing (see §7) |
+| delivered + verified | **38 archives / 6,255 pages / 5.87 GB** |
+| still to translate | **1 archive** (34.8 MP pages; needs a card bigger than 24 GB) |
+| machines running | **0** (last one destroyed by the runner itself) |
+| spend for the batch | **~$10.6**, of which ~$3.2 was operator error |
+| operator's local API route to `console.vast.ai` | was broken for a day; `cloud.vast.ai` serves the same API (see §7) |
 
 Resume steps are in §9. Read `deploy/VASTAI_PLAYBOOK.md` before renting anything.
 
@@ -136,19 +136,37 @@ Two of these were rejected after measurement and are worth remembering:
    `VAST_API_BASE=https://cloud.vast.ai` restored status, teardown and the guard.
    The lesson is not that the network failed, it is that an unreachable host is
    not the same thing as an unavailable service.
+10. **A host's link to the operator was the bottleneck, not the GPU.** Pages took
+    20-50 s while the GPU sat at 0 % and the host CPU was 97 % idle; one
+    `/prepare` round trip measured 49.8 s for 1.12 MB up and 1.75 MB down, i.e.
+    0.19 Mbps. A 20 MB download did not finish in five minutes. The same code on
+    a better-routed host ran at 4.6-8 s/page. Fix: after renting, pull 10 MB from
+    the host over ssh and refuse anything under ~1 MB/s. The next accepted host
+    measured 2.09 MB/s and ran the same archive class at **5-7 s/page**.
+11. **A clean-page marker with no text twin was not honoured.** One archive names
+    its whole second half `..._n01_1` ... `..._n26_6`, with no `_t` page anywhere.
+    Pairing therefore never fired and 55 of 138 clean pages were translated and
+    typeset onto art that had none. The marker alone now marks a page clean.
+12. **A PowerShell-written JSON manifest carried a BOM** and `json.load` refused
+    it, so the runner died on startup and the machine idled for six minutes.
+    Manifests are read with `utf-8-sig` now.
 
 ## 6. Cost, decomposed
 
 | item | ≈ |
 |---|---|
-| work that produced delivered pages | $5.8 |
+| work that produced delivered pages | $7.4 |
 | six hours of idle billing | $1.29 |
-| re-runs caused by the four judgement errors | $0.5 |
-| early phase before the VRAM fix (35-60 s/page) | part of the $5.8 but at 3-4x the marginal rate |
+| re-runs caused by the judgement errors | $0.9 |
+| early phase before the VRAM fix and before the link gate (30-60 s/page) | part of the $7.4, but at 3-6x the marginal rate |
 
-Marginal cost in steady state: **≈ $0.0008/page**. Session average including all
-mistakes: **≈ $0.0022/page**. The difference is the price of learning on a paid
-machine, and it is the reason the playbook now has V79-V82.
+Marginal cost in steady state: **≈ $0.0008/page** on a well-routed host; on a
+badly-routed one the same work costs 4-6x more at the same GPU price, because the
+GPU is idle while bytes crawl. Session average including all mistakes:
+**≈ $0.0017/page** (38 archives, 6,255 pages, ~$10.6).
+
+The difference between the marginal and average figures is the price of learning
+on a paid machine, and it is the reason the playbook now has V79-V86.
 
 ### 6.1 Why the waste happened: one pattern, five times
 
@@ -187,10 +205,14 @@ did.
    *both* hosts are unreachable is the API genuinely down - and then the answer is
    to run the call from the rented machine over ssh, not to give up on
    supervision.
-2. **34.8 MP pages.** Need a 45-48 GB card, or an image that downscales for LaMa
-   and composites back.
-3. **Clean-page detection** remains manual per archive (`skip_pages`).
-4. **Seven archives left**, ~2,100 pages, including a 381-page one.
+2. **34.8 MP pages.** One archive is out of scope for a 24 GB card: LaMa asks for
+   25.45 GiB. It needs a 45-48 GB card, or an image that downscales for LaMa and
+   composites the result back.
+3. **Clean-page detection.** The `_n` marker is honoured, with or without a `_t`
+   twin. Archives that append a clean half under ordinary names still need an
+   explicit `skip_pages` range; nothing reliable infers it from pixels.
+4. **Nothing is left to translate.** All 38 in-scope archives are delivered and
+   verified; the only outstanding item is the 34.8 MP archive above.
 
 ## 7.5 How to tell whether the batch is actually working
 

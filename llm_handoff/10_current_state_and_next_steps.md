@@ -2,9 +2,19 @@
 
 ## Exactly where things stand
 
+> **Update 2026-10-23.** A second batch is complete: **38 archives / 6,255 pages**
+> delivered and verified, machine destroyed, `MANIFEST.txt` written next to the
+> deliveries. One archive is out of scope for a 24 GB card (34.8 MP pages).
+> `17_run_report_batch2.md` has the numbers and `18_session_journey.md` has the
+> whole story. The table below describes the pipeline, not a batch count.
+> Additions since it was written: `tools/run_list.py` (manifest-driven runner with
+> `--reset-gpu`), `tools/heartbeat_guard.py` + a scheduled task that destroys a
+> stale machine, `VAST_API_BASE` (cloud.vast.ai fallback), and the rule that the
+> **host link** is measured before any work is run (V83).
+
 | Item | State |
 |---|---|
-| Core pipeline (`unpack→extract→translate→render→repack`) | **works**, verified on a 5-volume batch |
+| Core pipeline (`unpack→extract→translate→render→repack`) | **works**, verified on a 5-volume batch and then on a 38-volume / 6,255-page batch |
 | `auto` one-shot command | works; default output `<stem>_MTL_zhTW<ext>` |
 | OCR/inpaint service (`deploy/ocr_server.py`) | works; neural detector mask, LaMa erase, crops back to the original size, per-stage logging, `GET /logs`, restart loop |
 | Local CPU path | works; inpainting limited to lightweight methods (no LaMa without torch) |

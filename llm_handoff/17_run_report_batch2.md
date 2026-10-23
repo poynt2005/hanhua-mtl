@@ -9,11 +9,15 @@ keys** - only counts, timings and failure modes, so it can live in a public repo
 | | |
 |---|---|
 | archives to translate | 39 (4 more were already Chinese and excluded) |
-| delivered and verified | **31** |
-| pages delivered | **4,080** |
-| still to do | 7 |
+| **delivered and verified** | **38** |
+| **pages delivered** | **6,255** (5.87 GB) |
+| not delivered | 1 archive: its pages are 34.8 MP and inpainting needs 25.45 GiB on a 24 GB card |
 | machines used | several; every teardown confirmed with the provider API |
-| spend | ~$9 (of which ~$2.9 was operator error, see §5) |
+| spend | ~$10.6 (of which ~$3.2 was operator error, see §5) |
+
+The run finished on 2026-10-23: `38/38 archives verified`, machine destroyed
+automatically. A final aggregate pass re-checked every delivery against its source
+(page count, page names, page order, image dimensions): 38 passed, 0 failed.
 
 Every delivered archive was verified the same way: same page names, same order,
 unchanged dimensions, and 100 % of detected blocks translated. A representative
@@ -123,6 +127,34 @@ under time pressure. The countermeasure that actually helped was mechanical, not
 attentional: measure before acting (GPU %, file writes), and let something other
 than the operator decide when money stops.
 
+## 5.1 The last day: the link, not the GPU, was the bottleneck
+
+The remaining archives ran at 20-50 s/page while the GPU sat at 0 % and the host
+CPU was 97 % idle. A direct measurement of one `/prepare` round trip explained it:
+1.12 MB up plus 1.75 MB down took 49.8 s, an effective **0.19 Mbps**. A 20 MB
+download did not finish in 300 s. The same code on an earlier host had run at
+4.6-8 s/page.
+
+Countermeasure: rent, then **measure the link before running anything** - pull
+10 MB from the host over ssh and require at least 1 MB/s. With that gate the next
+host measured 2.09 MB/s and the same archive class ran at **5-7 s/page**, a 6x
+improvement with no code change. Two later hosts measured 1.09 and 1.42 MB/s and
+were accepted; both behaved as expected.
+
+Two smaller defects surfaced in the same session:
+
+* the clean-page marker was still not enough on its own. One archive names its
+  whole second half `..._n01_1` ... `..._n26_6` with **no `_t` counterpart**, so
+  pairing never fired and 55 of 138 clean pages were translated. A page carrying
+  the clean marker is now cleared whether or not a twin exists (109/109 and
+  138/138 byte-identical afterwards).
+* a JSON manifest written by PowerShell carried a UTF-8 BOM, and `json.load`
+  refused it; the runner died immediately and the machine idled for six minutes.
+  Manifests are now read with `utf-8-sig`.
+
+Final state: **38 archives / 6,255 pages verified**, machine destroyed by the
+runner itself, `remaining instances: []`.
+
 ## 6. How to resume
 
 ```powershell
@@ -131,10 +163,14 @@ python hanhua.py vast up --yes --image <repo>:0.5.0 --baked `
     --gpu "RTX 3090" --min-down 200 --max-price 0.28 --attempts 12 `
     --write-config config.json
 
-# 2. gate
+# 2. measure the link BEFORE spending anything on it: pull 10 MB from the host
+#    over ssh. Below ~1 MB/s every page costs 30-50 s, whatever the GPU does.
+#    (A host at 0.07 MB/s looked exactly like "a slow model".)
+
+# 3. gate
 python tools/gate.py --config config.json
 
-# 3. run the manifest: completed archives are skipped automatically
+# 4. run the manifest: completed archives are skipped automatically
 python tools/run_list.py --manifest batch.json --config config.json `
     --outdir <deliveries> --log run.jsonl `
     --reset-gpu --ssh-host <host> --ssh-port <port> --ssh-key vast_ssh

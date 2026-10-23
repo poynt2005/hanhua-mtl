@@ -14,6 +14,7 @@ Nothing here contains input material, filenames, hosts or keys.
 | pages | 6,557 |
 | already translated, excluded | 4 archives / 281 pages |
 | **to translate** | **39 archives / 6,276 pages** |
+| **runnable on a 24 GB card** | **38 archives / 6,255 pages** - one archive has 34.8 MP pages and needs a bigger card |
 
 The four excluded archives were checked by opening pages, not by trusting their
 filenames: one was machine-translated Simplified Chinese, three were Traditional
