@@ -238,7 +238,7 @@ def main():
                     help="destroy the recorded instance after all archives verified")
     args = ap.parse_args()
 
-    with open(args.manifest, encoding="utf-8") as fh:
+    with open(args.manifest, encoding="utf-8-sig") as fh:
         manifest = json.load(fh)
     raw = manifest["archives"] if isinstance(manifest, dict) else manifest
     archives = [item if isinstance(item, dict) else {"archive": item} for item in raw]
