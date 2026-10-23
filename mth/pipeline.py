@@ -72,6 +72,18 @@ def pair_by_names(project, mapping):
     for page, entry in clean:
         by_number.setdefault(_CLEAN_MARK.search(entry).group(1), []).append(page)
 
+    # A page carrying the clean marker is a clean page on its own, whether or not
+    # a `_t<n>` twin exists: one archive names its whole second half
+    # `…_n01_1` … `…_n26_6` with no text-page counterpart at all. Clearing only
+    # paired twins left 55 of those 138 pages translated and typeset.
+    cleared = 0
+    for page, _entry in clean:
+        if page["blocks"]:
+            page["blocks"] = []
+            cleared += 1
+    if cleared:
+        print("clean pages left untouched: %d" % cleared)
+
     used = set()
     paired = 0
     for page, entry in texted:
