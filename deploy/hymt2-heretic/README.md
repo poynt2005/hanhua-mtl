@@ -1,9 +1,11 @@
 # hymt2-heretic -- uncensored EN->ZH translation endpoint for adult galgames
 
 A lean GPU image: the official llama.cpp CUDA server plus an uncensored
-translation model, for **English -> Traditional Chinese** galgame text including
-H-scenes (explicit vocabulary, onomatopoeia, moaning). Boots make **no network
-calls**. It serves the separate galgame pipeline, not hanhua's manga pipeline.
+translation model, for **English -> Chinese** galgame text including H-scenes
+(explicit vocabulary, onomatopoeia, moaning). The model translates into
+**Simplified** (its strongest Chinese); the client converts to Taiwan
+Traditional with OpenCC `s2twp`. Boots make **no network calls**. It serves the
+separate galgame pipeline, not hanhua's manga pipeline.
 
 | | |
 |---|---|
@@ -22,7 +24,11 @@ calls**. It serves the separate galgame pipeline, not hanhua's manga pipeline.
 - The `sakura-ollama` image (Sakura-GalTransl) is **Japanese**->Chinese only.
 - **tencent/Hy-MT2-30B-A3B** (2026-05) is a dedicated translation model;
   English<->Chinese is its strongest direction; MoE with 3B active parameters,
-  so it is fast; Apache-2.0; outputs Traditional Chinese directly.
+  so it is fast; Apache-2.0.
+- **Simplified out, Traditional by OpenCC** (section 6.1): Simplified is where
+  the model's Chinese data -- and its slang/SFX vocabulary -- is; `s2twp` then
+  gives Taiwan characters *and* Taiwan vocabulary deterministically, which a
+  "translate into Traditional" instruction does not.
 - **Heretic v1.4 (ARA) by OS-Software** removes refusals: 100/100 -> 0/100 on
   the author's (Japanese) set, KL divergence 0.0276 from the original.
 - **i1-Q4_K_M**: the imatrix quant marked "recommended"; the largest that fits a
@@ -36,7 +42,7 @@ calls**. It serves the separate galgame pipeline, not hanhua's manga pipeline.
 
 | | sakura-ollama | hymt2-heretic | Consequence for a client |
 |---|---|---|---|
-| Direction | JA -> Simplified | **EN -> Traditional** | skip OpenCC |
+| Direction | JA -> Simplified | **EN -> Simplified** | keep an OpenCC step, but use **`s2twp`** (Taiwan vocabulary) |
 | Prompt | Sakura system prompt + "历史翻译/术语表" block | **no system prompt**; Hy-MT2 templates (section 6) | must change |
 | Sampling | temp 0.3, top_p 0.8 | temp 0.7, top_p 1.0, top_k off | send explicitly; client values override the server |
 | Context per request | 16384 | **8192** | keep history short (the reference sends 3 lines) |
@@ -97,25 +103,26 @@ block; exit code 1 otherwise. **Do not run a batch on a failed gate.**
 Rules from the model card:
 
 - No system message. One user message.
-- Chinese instructions; name the language in full: `繁体中文`.
+- Chinese instructions (Simplified, as in the card); name the target in full:
+  `简体中文`.
 - No thinking: the chat template defaults to `reasoning_effort = no_think`; do
   not pass `high`/`low`.
 
 The prompt this image ships with (`hymt2_prompt.build_messages`) uses the card's
 **personalization** template -- the only official one that carries several
 requirements at once. Example for `Fuck me harder, Onii-chan!` with a glossary
-and a speaker:
+(kept in Traditional: `"harder": "用力幹"`) and a speaker (`優衣`):
 
 ```
 【待翻译文本】
 Fuck me harder, Onii-chan!
 【翻译任务】
 1、成人向Galgame台词风格：口语化、直白露骨，性器官与性行为使用直接的说法，不委婉、不省略、不说教；拟声词与喘息译成对应的中文拟声词，保留原文的拉长音、重复次数与标点（……、～、！）
-2、参考下面的翻译：onii-chan 翻译成 哥哥；harder 翻译成 用力
-3、说话人是「Yui」，人名保持一致
+2、参考下面的翻译：onii-chan 翻译成 哥哥；harder 翻译成 用力干
+3、说话人是「优衣」，人名保持一致
 4、上文（仅供参考，不要翻译）：<previous 3 lines>
 5、只输出译文，不要额外解释，不要输出原文
-6、将【待翻译文本】翻译为繁体中文。
+6、将【待翻译文本】翻译为简体中文。
 ```
 
 - **Line 1 (style)** is what stops euphemising: decensoring removes refusals,
@@ -131,9 +138,33 @@ Fuck me harder, Onii-chan!
 - **Fallback**: if the output fails the mechanical checks (empty, thinking tag,
   "译文：" prefix, extra lines, untranslated), `translate()` retries once with
   the card's plain template:
-  `将以下文本翻译为繁体中文，注意只需要输出翻译后的结果，不要额外解释：\n\n{text}`
+  `将以下文本翻译为简体中文，注意只需要输出翻译后的结果，不要额外解释：\n\n{text}`
 - **Stream every request** and retry dropped connections: a rented host's port
   forward drops a silent socket after ~15 s.
+
+### 6.1 Script: the model works in Simplified only
+
+Goal: the model's side runs at full capability; Traditional is a post-process.
+
+- **Target `简体中文`.** The model's Chinese training data, and most of the
+  explicit/SFX vocabulary it knows, is Simplified. Asking for `繁体中文` makes the
+  model do two jobs at once (translate + convert script) and still yields
+  mainland vocabulary in Traditional glyphs, with occasional Simplified leaks.
+- **One script in the prompt.** Glossary targets and speaker names are converted
+  to Simplified (`tw2sp`) before they are sent, so a glossary can be maintained
+  in Traditional without mixing scripts in what the model sees.
+- **Convert after**, client side: OpenCC **`s2twp`** = Taiwan characters + Taiwan
+  phrases (软件->軟體, 视频->影片), context-aware for one-to-many characters
+  (干净->乾淨, 干我->幹我, 头发->頭髮). `translate()` does this by default;
+  `traditional=False` returns the raw Simplified.
+- Requires `pip install opencc-python-reimplemented` on the client. Without it
+  `to_traditional()` raises; it never silently returns Simplified.
+- Spot-check one-to-many characters (干/幹/乾, 发/發/髮, 后/後/后, 面/麵) in the
+  first real batch; fix a recurring miss by putting the phrase in the glossary.
+- What else keeps the model at full strength: the card's sampling (sent per
+  request), `no_think`, its trained templates. The one capability trade-off in
+  this image is the quant: **Q4_K_M** is the largest that fits 24 GB; Q6_K
+  (24.8 GB) or Q8_0 (32.1 GB) need a 32-48 GB card and a new image tag.
 
 ## 7. Client integration checklist (the galgame client's `hymt2` profile)
 
@@ -142,7 +173,8 @@ Fuck me harder, Onii-chan!
 - [ ] sampling `temperature 0.7, top_p 1.0, top_k 0, repeat_penalty 1.0` sent per request
 - [ ] `stream: true` + retries
 - [ ] one line per request; up to 4 in flight
-- [ ] **no OpenCC** step (output is already Traditional)
+- [ ] target `简体中文` in the prompt; glossary/speaker converted to Simplified before sending
+- [ ] OpenCC **`s2twp`** on the output (not `s2t`/`s2tw`: those skip Taiwan vocabulary)
 - [ ] no ollama `/api/*` calls (unload, tags); readiness via `/health`
 - [ ] keep any history/context within 8192 tokens per request
 - [ ] glossary file for names, honorifics, explicit terms, SFX
@@ -160,7 +192,10 @@ Fuck me harder, Onii-chan!
 | refusal text | decensor measured on Japanese, not English | report it with the input line; try the plain template |
 | `context size exceeded` | request > 8192 tokens | less context, or fewer slots (`LLAMA_ARG_N_PARALLEL=2` -> 16384 each) |
 | connection dropped mid-reply | port-forward idle timeout | stream (default in `hymt2_prompt.py`) |
-| output in Simplified | target name wrong | must be exactly `繁体中文` |
+| final output still Simplified | OpenCC step skipped / not installed | `pip install opencc-python-reimplemented`; use `translate()` or `to_traditional()` |
+| mainland wording in the final text (软件 -> 軟件) | converted with `s2t`/`s2tw` | use `s2twp` |
+| wrong one-to-many character (乾我, 頭發) | OpenCC phrase table miss | add the phrase to the glossary; report the line |
+| model output partly Traditional | Traditional text inside the prompt | convert glossary/speaker with `to_simplified()` (the reference does) |
 
 ## 9. Known risks (unmeasured until the first GPU run)
 

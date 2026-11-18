@@ -22,6 +22,13 @@ Design (why it looks like this):
   * Sampling = the model card's recommendation for 30B-A3B. Send it explicitly:
     a client's values override the server defaults, so a client still sending
     Sakura's 0.3 / 0.8 would silently change behaviour.
+  * The model translates into SIMPLIFIED Chinese - its strongest Chinese (most
+    of its Chinese data, and most of the slang/SFX vocabulary, is Simplified).
+    Everything the model sees is kept in one script: glossary targets and
+    speaker names are converted to Simplified before prompting. The client then
+    converts the result to Taiwan Traditional with OpenCC `s2twp` (characters
+    AND Taiwan vocabulary; context-aware for one-to-many characters such as
+    干 -> 幹/乾, 发 -> 發/髮). Needs `pip install opencc-python-reimplemented`.
 """
 import argparse
 import json
@@ -32,7 +39,32 @@ import urllib.error
 import urllib.request
 
 MODEL = "hy-mt2-heretic"
-TARGET_LANG = "繁体中文"  # the card requires the full Chinese language name
+# The model's strongest target; the card requires the full Chinese name.
+# Traditional is produced afterwards by OpenCC (to_traditional), never by the model.
+TARGET_LANG = "简体中文"
+
+_CC = {}
+
+
+def _opencc(config):
+    """OpenCC converter, created once. Raises a clear error if not installed."""
+    if config not in _CC:
+        try:
+            from opencc import OpenCC
+        except ImportError as exc:
+            raise RuntimeError("OpenCC is required: pip install opencc-python-reimplemented") from exc
+        _CC[config] = OpenCC(config)
+    return _CC[config]
+
+
+def to_simplified(text):
+    """Taiwan Traditional -> Simplified, for anything we put INTO the prompt."""
+    return _opencc("tw2sp").convert(text) if text else text
+
+
+def to_traditional(text):
+    """Model output (Simplified) -> Taiwan Traditional with Taiwan vocabulary."""
+    return _opencc("s2twp").convert(text) if text else text
 
 SAMPLING = {"temperature": 0.7, "top_p": 1.0, "top_k": 0,
             "repeat_penalty": 1.0, "max_tokens": 1024}
@@ -63,9 +95,11 @@ def build_messages(text, glossary=None, speaker=None, context=None, style=STYLE_
         reqs.append(style)
     terms = _relevant_terms(text, glossary)
     if terms:
-        reqs.append("参考下面的翻译：" + "；".join("%s 翻译成 %s" % t for t in terms))
+        # glossaries are usually kept in Traditional; the model sees Simplified only
+        reqs.append("参考下面的翻译：" + "；".join(
+            "%s 翻译成 %s" % (src, to_simplified(dst)) for src, dst in terms))
     if speaker:
-        reqs.append("说话人是「%s」，人名保持一致" % speaker)
+        reqs.append("说话人是「%s」，人名保持一致" % to_simplified(speaker))
     if context:
         reqs.append("上文（仅供参考，不要翻译）：" + " / ".join(context[-3:]))
     reqs.append(OUTPUT_ONLY)
@@ -139,12 +173,17 @@ def clean(output):
     return re.sub(r"</?think[^>]*>", "", text).strip()
 
 
-def translate(api_base, text, glossary=None, speaker=None, context=None):
-    """Rich prompt first; on a mechanical problem retry once with the plain one."""
+def translate(api_base, text, glossary=None, speaker=None, context=None, traditional=True):
+    """Rich prompt first; on a mechanical problem retry once with the plain one.
+
+    Returns Taiwan Traditional (OpenCC s2twp) by default; traditional=False
+    returns the model's Simplified output untouched.
+    """
     out = chat(api_base, build_messages(text, glossary, speaker, context))
     if problems(out, text):
         out = chat(api_base, build_messages_plain(text))
-    return clean(out)
+    out = clean(out)
+    return to_traditional(out) if traditional else out
 
 
 # Gate: one plain line, one explicit line, one SFX line. Each must come back as
@@ -163,8 +202,8 @@ def gate(api_base):
         out = chat(api_base, build_messages(line))
         bad = problems(out, line) + (["refusal"] if _REFUSAL.search(out) else [])
         ok &= not bad
-        print("%-5s %s -> %s %s" % ("OK" if not bad else "FAIL", line, out.strip(),
-                                    bad if bad else ""))
+        print("%-5s %s -> %s => %s %s" % ("OK" if not bad else "FAIL", line, out.strip(),
+                                          to_traditional(clean(out)), bad if bad else ""))
     return ok
 
 
@@ -178,6 +217,7 @@ def main(argv=None):
     t.add_argument("--glossary", help="JSON file: {\"english term\": \"中文\"}")
     t.add_argument("--speaker")
     t.add_argument("--show-prompt", action="store_true")
+    t.add_argument("--simplified", action="store_true", help="print the raw model output")
     a = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):  # Chinese output on a Windows console
         if hasattr(stream, "reconfigure"):
@@ -190,7 +230,7 @@ def main(argv=None):
             gl = json.load(f)
     if a.show_prompt:
         print(build_messages(a.text, gl, a.speaker)[0]["content"], file=sys.stderr)
-    print(translate(a.api_base, a.text, gl, a.speaker))
+    print(translate(a.api_base, a.text, gl, a.speaker, traditional=not a.simplified))
     return 0
 
 
