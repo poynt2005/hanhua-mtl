@@ -2,6 +2,16 @@
 
 ## Exactly where things stand
 
+> **Update 2026-11-18 (side branches, not this pipeline).** Master is unchanged
+> since 2026-10-23 apart from docs. Branch `hymt2-heretic` now builds
+> `hanhua-gpu:hymt2-30b-a3b-heretic-q4km`: llama.cpp b12019 +
+> Hy-MT2-30B-A3B-uncensored-heretic i1-Q4_K_M, an English->Chinese endpoint for
+> the owner's **galgame** pipeline (a different project), alongside the older
+> `sakura-ollama` branch (JA->ZH). It is built and pushed but **never booted**.
+> Before renting for it: `hanhua.py vast up` maps 8000/8080, filters CUDA 12.1
+> and its `--ssh` launch skips the image CMD, so it cannot boot that image as
+> written -- fix it first (free). Everything is in `19_galgame_image_branches.md`.
+
 > **Update 2026-10-23.** A second batch is complete: **38 archives / 6,255 pages**
 > delivered and verified, machine destroyed, `MANIFEST.txt` written next to the
 > deliveries. One archive is out of scope for a 24 GB card (34.8 MP pages).
@@ -152,6 +162,13 @@ the contact sheets and have a human look before changing code.**
 - ~~Move the useful helper scripts into `tools/`.~~ **Done** - all of them are in
   `tools/` now (`rent_and_run.py`, `gate.py`, `pull_watch.py`, `verify_batch.py`,
   `run_batch.py`, `audit_detection.py`, `audit_sheets.py`, `collect.py`).
+
+### Side branches (galgame images; details in `19_galgame_image_branches.md`)
+- P0: teach `hanhua.py vast up` to boot a non-master image (`--ports`,
+  `--min-cuda`, onstart override, readiness URL); test with `--dry-run`.
+- P0: first GPU boot + `hymt2_prompt.py gate` of the hymt2 image, after a budget
+  report and the owner's consent (~$0.10 expected).
+- P1: `hymt2` profile in the galgame client; needs that project's path.
 
 ### P2 — nice to have
 - Consider `PaddleOCR-VL-For-Manga` (Apache-2.0, 70% full-sentence accuracy on

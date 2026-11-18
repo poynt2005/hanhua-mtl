@@ -202,6 +202,11 @@ Full steps in `deploy/VASTAI_PLAYBOOK.md`:
 - `hanhua.py vast up --yes --image <tag> --baked`: rent + deploy + return endpoints.
 - `hanhua.py vast down`: destroy everything.
 
+> **Side-branch images** (`sakura-ollama`, `hymt2-heretic`) are translation-only
+> endpoints for a different project (galgame scripts) on port 11434. `vast up
+> --baked`, `tools/gate.py` and ports 8000/8080 do **not** apply to them; read
+> `llm_handoff/19_galgame_image_branches.md` before renting for one.
+
 When the user gives you `api_base` / `ocr_url`, put them in `config.json` and use
 `--profile sakura --ocr http`.
 

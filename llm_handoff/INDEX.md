@@ -29,6 +29,7 @@ agent needs to continue seamlessly from the current state.
 | 16 | `16_batch_operations.md` | **the second-batch runbook**: what the batch contains structurally, the clean-twin opportunity, the two pipeline fixes, the cost model, monitoring without SSH, and the approaches deliberately rejected |
 | 17 | `17_run_report_batch2.md` | **what actually happened executing that plan**: all 38 archives delivered (6,255 pages), measured seconds/page, where the money went, the failure modes met, the operator errors and their cost, and how to resume |
 | 18 | `18_session_journey.md` | **the whole journey in one narrative**, for an agent arriving cold: the material's structure, the five pipeline changes, everything the rented machine taught, the incidents in order, the cost decomposition, the open problems, and a "do not do this" list |
+| 19 | `19_galgame_image_branches.md` | **the side branches `sakura-ollama` and `hymt2-heretic`**: translation-only images for the owner's separate galgame pipeline (not this manga pipeline), the hymt2 model decision, CI trigger rules, and why `vast up` cannot boot those images yet |
 
 ## Related documents (kept in place, not duplicated here)
 
@@ -47,8 +48,12 @@ agent needs to continue seamlessly from the current state.
 
 - The **core pipeline works end to end**: archive in → translated archive out,
   same page count and order.
-- The **GPU stack is packaged** in `deploy/Dockerfile` (not yet built/verified
-  because no Docker was available on the authoring machine).
-- The **vast.ai automation** now uses a prebuilt image + HTTP readiness polling
+- The **GPU stack is packaged** in `deploy/Dockerfile`, built by CI on a `v*`
+  tag (current: v0.5.0), and has delivered two batches (the second: 38 archives
+  / 6,255 pages).
+- The **vast.ai automation** uses a prebuilt image + HTTP readiness polling
   (no SSH required for the happy path).
+- Two **side branches** build translation-only images for a different project
+  (galgame scripts): `sakura-ollama` (JA->ZH) and `hymt2-heretic` (EN->ZH,
+  uncensored, built 2026-11-18, never booted). See doc 19.
 - Known open items are listed in `10_current_state_and_next_steps.md`.
