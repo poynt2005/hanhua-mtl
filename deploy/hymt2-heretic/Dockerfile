@@ -9,11 +9,17 @@
 #   quant    : mradermacher i1-Q4_K_M (marked "recommended" on the repo)
 #
 # Why llama.cpp and not ollama (unlike the sakura-ollama image):
-#   * the architecture is `hy_v3` (HYV3ForCausalLM); llama.cpp supports it since
-#     b9993 (PR #25395), and the server image is pinned to a build after that;
-#   * `ollama create` keeps the GGUF and its blob side by side (2x 18 GB),
-#     which does not fit the GitHub runner's disk; llama-server reads the GGUF
-#     file directly, so the layer holds the model exactly once.
+#   the architecture is `hy_v3` (HYV3ForCausalLM). llama.cpp supports it since
+#   b9993 (PR #25395) and the pinned b12019 lists it in src/llama-arch.cpp;
+#   ollama's support for it is unverified. llama-server also reads the GGUF file
+#   directly, so the layer holds the model once (no separate ollama blob).
+#
+# VRAM (24 GB card): weights 18.24 GB (~17.0 GiB) + KV cache 96 KiB/token
+#   (48 layers x 4 KV heads x 128 dim x K,V x fp16) x 32768 tokens = 3.0 GiB
+#   + compute buffers ~= 21 GiB.
+#
+# The GGUF's chat template defaults to reasoning_effort = no_think, so replies
+# carry no thinking block.
 #
 # Boot makes NO network calls (HuggingFace is unreachable from many rented
 # hosts -- see llm_handoff/12_hf_network_audit.md).
@@ -60,7 +66,7 @@ ENV LLAMA_ARG_MODEL=/models/model.gguf \
     LLAMA_ARG_CTX_SIZE=32768 \
     LLAMA_ARG_N_PARALLEL=4 \
     LLAMA_ARG_JINJA=1 \
-    LLAMA_ARG_NO_WEBUI=1
+    LLAMA_ARG_UI=0
 
 # The base image's healthcheck probes :8080; the server listens on 11434 here.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \

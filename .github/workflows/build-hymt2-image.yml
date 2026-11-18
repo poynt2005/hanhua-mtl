@@ -27,14 +27,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The model layer is 18.2 GB and buildx needs it twice at peak (the layer
-      # plus its compressed copy for the push): free everything removable.
+      # Same cleanup as the sakura-ollama build, which left 104 GB free; the
+      # 18.2 GB model layer plus its compressed copy for the push fits easily.
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-                      /opt/hostedtoolcache /usr/local/share/boost \
-                      /usr/share/swift /usr/local/.ghcup /usr/local/share/powershell || true
-          sudo docker image prune -af || true
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
           df -h /
 
       - uses: docker/setup-buildx-action@v3

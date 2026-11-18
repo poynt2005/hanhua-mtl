@@ -52,6 +52,8 @@ with no explanation, no `<think>` block and no refusal.
 ## How to prompt it (from the model card)
 
 - **No system prompt.** Put everything in one user message.
+- No thinking: the chat template defaults to `reasoning_effort = no_think`;
+  do not pass `high`/`low`.
 - Sampling: `temperature 0.7, top_p 1.0, top_k off, repetition_penalty 1.0,
   max_tokens 4096` (already the server defaults; a client may override).
 - Chinese instructions must name the language in full Chinese: `繁体中文`.
