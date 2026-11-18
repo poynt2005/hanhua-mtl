@@ -1,0 +1,58 @@
+name: build-hymt2-heretic-image
+
+# Branch-scoped build: a LEAN llama.cpp server with the uncensored EN->ZH
+# translation model Hy-MT2-30B-A3B-uncensored-heretic (i1-Q4_K_M) baked in,
+# for adult galgame text. No OCR stack.
+#
+#   image: docker.io/<DOCKERUSR>/hanhua-gpu:hymt2-30b-a3b-heretic-q4km
+#
+# Tag policy: this workflow pushes EXACTLY ONE tag, distinct from the master
+# image tags (<version>, :latest) and from the sakura-ollama tag. It only
+# triggers on its own branch and never touches master.
+#
+# Required secrets: DOCKERUSR / DOCKERPASS (same as build-image.yml).
+
+on:
+  push:
+    branches:
+      - hymt2-heretic
+    paths:
+      - deploy/hymt2-heretic/**
+      - .github/workflows/build-hymt2-image.yml
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The model layer is 18.2 GB and buildx needs it twice at peak (the layer
+      # plus its compressed copy for the push): free everything removable.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache /usr/local/share/boost \
+                      /usr/share/swift /usr/local/.ghcup /usr/local/share/powershell || true
+          sudo docker image prune -af || true
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERUSR }}
+          password: ${{ secrets.DOCKERPASS }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: deploy/hymt2-heretic
+          file: deploy/hymt2-heretic/Dockerfile
+          push: true
+          # No cache: the 18 GB model layer cannot fit the GHA cache (10 GB limit).
+          tags: |
+            ${{ secrets.DOCKERUSR }}/hanhua-gpu:hymt2-30b-a3b-heretic-q4km
+
+      - name: Disk after build
+        if: always()
+        run: df -h /
