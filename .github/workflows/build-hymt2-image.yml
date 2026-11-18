@@ -16,8 +16,10 @@ on:
   push:
     branches:
       - hymt2-heretic
+    # Only what goes into the image. README / hymt2_prompt.py are not copied
+    # into it, so editing them must not cost an 18-minute rebuild.
     paths:
-      - deploy/hymt2-heretic/**
+      - deploy/hymt2-heretic/Dockerfile
       - .github/workflows/build-hymt2-image.yml
   workflow_dispatch:
 
