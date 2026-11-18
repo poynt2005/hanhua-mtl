@@ -16,6 +16,8 @@ separate galgame pipeline, not hanhua's manga pipeline.
 | Server | llama.cpp `server-cuda-b12019` (CUDA 12.8), OpenAI-compatible on `:11434/v1` |
 | Slots / context | 4 parallel requests, **8192 tokens each** (32768 shared) |
 | Reference client | `hymt2_prompt.py` (stdlib only): the prompt, a streaming client, the gate |
+| Handoff | `llm_handoff/19_galgame_image_branches.md`: decision record, build record, open items |
+| State (2026-11-18) | built and pushed; **never booted on a GPU yet**; `hanhua.py vast up` cannot launch it as-is (section 3.1) |
 
 ---
 
@@ -64,6 +66,28 @@ separate galgame pipeline, not hanhua's manga pipeline.
   machine, $1 cap, verify teardown). hanhua's `vast up --baked` and
   `tools/gate.py` assume the master image (ports 8000/8080, ollama API) and do
   **not** apply; map port 11434 and use `hymt2_prompt.py gate`.
+
+### 3.1 On vast.ai: the image's CMD does not run
+
+hanhua rents with `--ssh` launch mode. In that mode vast runs **its own**
+entrypoint (sshd), so this image's `ENTRYPOINT` / `CMD` never start the server:
+the onstart command must. Master's `hanhua.py vast up` today maps ports
+8000/8080, filters `cuda_max_good >= 12.1`, runs the master image's
+`container_start.sh` and waits for 8000 + 8080 -- all wrong for this image. Fix
+that first (free, `--dry-run` testable; see
+`llm_handoff/19_galgame_image_branches.md` section 5): port 11434,
+`cuda_max_good >= 12.8`, this onstart, readiness on `:11434/health`.
+
+```bash
+nohup /app/llama-server -m /models/model.gguf --alias hy-mt2-heretic \
+  --host 0.0.0.0 --port 11434 -ngl 999 -c 32768 -np 4 --jinja \
+  --temp 0.7 --top-p 1.0 --top-k 0 --repeat-penalty 1.0 \
+  >/root/llama.log 2>&1 </dev/null & echo started
+```
+
+Flags are explicit so the onstart does not depend on vast passing the image's
+`ENV` through. If the binary cannot find its shared libraries, prefix
+`LD_LIBRARY_PATH=/app`. The log is `/root/llama.log`.
 
 ## 4. Run and configure
 
@@ -206,6 +230,8 @@ Goal: the model's side runs at full capability; Traditional is a post-process.
 3. The personalization prompt with an explicit style line is this image's
    design, not a card example; the gate and a 50-line spot check on real H-scene
    text must confirm it before a full script.
+4. Starting `/app/llama-server` from a vast onstart (section 3.1) instead of
+   the image entrypoint is unexercised.
 
 ## 10. Rebuild / change the model
 
