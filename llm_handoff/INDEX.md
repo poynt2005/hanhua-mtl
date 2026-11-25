@@ -27,10 +27,12 @@ agent needs to continue seamlessly from the current state.
 | 14 | `14_thrashing_postmortem.md` | **read before changing anything**: how this project repeatedly broke its own fixes, every regression, the anti-patterns, and the loop that works instead |
 | 15 | `15_run_log.md` | **the full session, attempt by attempt**: every wrong diagnosis and its cost, the batch, the model upgrade, the detection over-call, the infrastructure failures, and the final state |
 | 19 | `19_galgame_image_branches.md` | **the galgame side branches** (`sakura-ollama`, `hymt2-heretic`): what each image is, the hymt2 decision record, CI trigger rules, and the checklist for its first GPU run |
+| 20 | `20_hymt2_colab_workflow.md` | **this branch (`hymt2-heretic-colab`)**: Google Colab L4 + Google Drive 5TB one-click EN->ZH adult galgame workflow, free CPU GGUF deployer, Option A `drive_bridge.py`, Agent migration SOP, offline tests & handoff log |
 
-> This copy of `llm_handoff/` is on a side branch and is **stale** apart from
-> doc 19: master holds 16-18 and the current state. Read master's handoff for
-> anything outside `deploy/hymt2-heretic/`.
+> This copy of `llm_handoff/` is on the `hymt2-heretic-colab` side branch and is
+> **stale** apart from docs `19` and `20`: `master` holds `16`-`18` and the
+> current manga state. Read **`20_hymt2_colab_workflow.md`** and
+> `deploy/colab-hymt2/` for everything on this branch.
 
 ## Related documents (kept in place, not duplicated here)
 
