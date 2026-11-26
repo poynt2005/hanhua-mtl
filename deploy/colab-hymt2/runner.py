@@ -658,13 +658,20 @@ def start_and_verify_server(
         proc.terminate()
         raise RuntimeError("Timed out waiting for llama-server /health and /v1/models")
 
-    log_txt = log_path.read_text(encoding="utf-8", errors="replace")
-    try:
-        offloaded, total = parse_gpu_offload_log(log_txt)
-    except Exception as exc:
-        proc.terminate()
-        tail = log_txt[-800:].strip()
-        raise RuntimeError(f"{exc}\n--- llama.log tail ---\n{tail}") from exc
+    # Poll briefly because llama.cpp common_log flushes via a background thread
+    log_txt = ""
+    offloaded, total = 0, 0
+    for attempt in range(10):
+        log_txt = log_path.read_text(encoding="utf-8", errors="replace")
+        try:
+            offloaded, total = parse_gpu_offload_log(log_txt)
+            break
+        except Exception as exc:
+            if attempt == 9:
+                proc.terminate()
+                tail = log_txt[-800:].strip()
+                raise RuntimeError(f"{exc}\n--- llama.log tail ---\n{tail}") from exc
+            time.sleep(0.5)
     print(f"[gpu] Gate 2 PASS: offloaded {offloaded}/{total} layers to GPU")
 
     used_stats = query_gpu_stats()
@@ -684,15 +691,27 @@ def run_preflight_gate(api_base: str, min_tps: float = DEFAULT_MIN_TPS) -> None:
     total_tokens = 0
     total_sec = 0.0
     for idx, sample in enumerate(GATE_SAMPLES, start=1):
-        msgs = build_hymt2_messages(sample["text"], sample["kind"], [])
-        out, toks, elapsed = chat_stream(api_base, MODEL_ALIAS, msgs)
-        probs = mechanical_problems(out, sample["text"])
-        if probs:
-            raise RuntimeError(f"Gate sample {idx} failed {probs}: {out!r}")
-        cn = output_to_simplified(clean_output(out))
-        total_tokens += toks
-        total_sec += elapsed
-        print(f"  [gate {idx}/3 OK] {sample['text']} -> {cn}")
+        candidates = (
+            build_hymt2_messages(sample["text"], sample["kind"], []),
+            build_hymt2_messages_plain(sample["text"]),
+        )
+        last_probs: list[str] = []
+        last_out = ""
+        passed = False
+        for msgs in candidates:
+            out, toks, elapsed = chat_stream(api_base, MODEL_ALIAS, msgs)
+            probs = mechanical_problems(out, sample["text"])
+            if not probs:
+                cn = output_to_simplified(clean_output(out))
+                total_tokens += toks
+                total_sec += elapsed
+                print(f"  [gate {idx}/3 OK] {sample['text']} -> {cn}")
+                passed = True
+                break
+            last_probs = probs
+            last_out = out
+        if not passed:
+            raise RuntimeError(f"Gate sample {idx} failed {last_probs}: {last_out!r}")
 
     tps = total_tokens / max(0.001, total_sec)
     print(f"[gate] Gate 4 PASS: {tps:.1f} tok/s (threshold >= {min_tps:.1f})")
@@ -872,36 +891,53 @@ def translate_job(
         queues = [items[i : i + step] for i in range(0, len(items), step)]
 
     ckpt_lock = threading.Lock()
+    gpu_log_lock = threading.Lock()
     progress_counter = {"count": len(done_map)}
     all_failures: list[dict[str, Any]] = []
+
+    def _flush_pending(pending: list[dict[str, Any]]) -> None:
+        if not pending:
+            return
+        should_log_gpu = False
+        cur_done = 0
+        with ckpt_lock:
+            with open(ckpt_path, "a", encoding="utf-8", newline="\n") as fh:
+                for row in pending:
+                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    done_map[row["wid"]] = row
+                fh.flush()
+            prev = progress_counter["count"]
+            progress_counter["count"] += len(pending)
+            cur_done = progress_counter["count"]
+            should_log_gpu = (cur_done // 50) > (prev // 50)
+            pending.clear()
+        if should_log_gpu:
+            with gpu_log_lock:
+                _log_gpu_progress(cur_done, len(work_units), gpu_log, skip_gpu_check)
 
     def _run_queue(q_units: list[dict[str, Any]]) -> list[dict[str, Any]]:
         q_failures: list[dict[str, Any]] = []
         context: list[str] = []
-        for u in q_units:
-            use_ctx = [] if u["kind"] in ("ui", "system") else context
-            cn, raw_saved, flags, probs = _translate_one_unit(api_base, u, glossary_cn, use_ctx)
-            if cn is not None:
-                if u["kind"] not in ("ui", "system"):
-                    context = (context + [u["text"]])[-3:]
-                with ckpt_lock:
-                    with open(ckpt_path, "a", encoding="utf-8", newline="\n") as fh:
-                        row: dict[str, Any] = {"wid": u["wid"], "zh_cn": cn}
-                        if raw_saved is not None:
-                            row["raw"] = raw_saved
-                        if flags:
-                            row["flags"] = flags
-                        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-                        fh.flush()
-                        done_map[u["wid"]] = row
-                    prev = progress_counter["count"]
-                    progress_counter["count"] += 1
-                    if (progress_counter["count"] // 50) > (prev // 50):
-                        _log_gpu_progress(
-                            progress_counter["count"], len(work_units), gpu_log, skip_gpu_check
-                        )
-            else:
-                q_failures.append({"wid": u["wid"], "text": u["text"], "errors": probs})
+        pending_rows: list[dict[str, Any]] = []
+        try:
+            for u in q_units:
+                use_ctx = [] if u["kind"] in ("ui", "system") else context
+                cn, raw_saved, flags, probs = _translate_one_unit(api_base, u, glossary_cn, use_ctx)
+                if cn is not None:
+                    if u["kind"] not in ("ui", "system"):
+                        context = (context + [u["text"]])[-3:]
+                    row: dict[str, Any] = {"wid": u["wid"], "zh_cn": cn}
+                    if raw_saved is not None:
+                        row["raw"] = raw_saved
+                    if flags:
+                        row["flags"] = flags
+                    pending_rows.append(row)
+                    if len(pending_rows) >= 10:
+                        _flush_pending(pending_rows)
+                else:
+                    q_failures.append({"wid": u["wid"], "text": u["text"], "errors": probs})
+        finally:
+            _flush_pending(pending_rows)
         return q_failures
 
     if queues:

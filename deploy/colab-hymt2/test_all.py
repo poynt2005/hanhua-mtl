@@ -379,6 +379,9 @@ class Hymt2ColabTests(unittest.TestCase):
             if nb_name == "hymt2_colab.ipynb":
                 self.assertNotIn("REBUILD_LLAMA_BIN", full_src)
                 self.assertNotIn("--rebuild-bin", full_src)
+                self.assertIn("DISCONNECT_ON_ERROR", full_src)
+            bridge_src = (HERE / "drive_bridge.py").read_text(encoding="utf-8")
+            self.assertNotIn("copy2", bridge_src)
             for c in code_cells:
                 src = "".join(c["source"])
                 cleaned = "\n".join(

@@ -88,7 +88,7 @@ def _sync_scripts(dirs: dict[str, Path]) -> None:
         if src.is_file():
             dst = dest_dir / name
             tmp = dst.with_name(f".{name}.tmp.{os.getpid()}")
-            shutil.copy2(src, tmp)
+            shutil.copyfile(src, tmp)
             os.replace(tmp, dst)
 
 
@@ -118,6 +118,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"[doctor] Model SHA-256   : {h} ({'OK' if hash_ok else 'MISMATCH'})")
         if not hash_ok:
             return 1
+
+    bin_tar = dirs["bin"] / "llama-server-l4-b12019.tar.gz"
+    if bin_tar.is_file():
+        print(f"[doctor] Prebuilt bin    : OK ({bin_tar.stat().st_size} bytes)")
+    else:
+        print("[doctor] Prebuilt bin    : MISSING (will auto-download from GitHub Release on Colab)")
 
     inputs = sorted(p.name for p in dirs["hymt2_input"].glob("*.jsonl"))
     dones = sorted(p.name for p in dirs["hymt2_output"].glob("*.DONE.json"))
@@ -290,7 +296,7 @@ def cmd_pull(args: argparse.Namespace) -> int:
         if src.is_file():
             dst = dest / src.name
             tmp = dst.with_name(f".{src.name}.tmp.{os.getpid()}")
-            shutil.copy2(src, tmp)
+            shutil.copyfile(src, tmp)
             os.replace(tmp, dst)
 
     print(
