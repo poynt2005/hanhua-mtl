@@ -1,11 +1,11 @@
 # 20 — Sakura Colab Workflow (`sakura-ollama-colab`)
 
 > **Branch:** `sakura-ollama-colab` (branched from `origin/sakura-ollama` at `a94c8fb`)
-> **Updated:** 2026-11-26 13:35 +08:00
+> **Updated:** 2026-11-26 14:30 +08:00
 > **Agent:** Antigravity
 > **Model:** Gemini 4 Neon
-> **Status:** READY TO PUSH — Milestone 8 complete (fixed F1 async `llama.log` poll, F2 `roundtrip_mismatches` vs `cn`, F4 `DISCONNECT_ON_ERROR` toggle, F5 `drive_bridge` `copyfile` + `doctor` `Prebuilt bin` check, F6 stale comment, F7 `gpu_log_lock` outside `ckpt_lock`; offline tests 6/6 & sanitization passed)
-> **Session Postmortem & Full Context:** See [21_colab_session_postmortem.md](21_colab_session_postmortem.md) for the complete C1–C8 failure table, 6-item operator accountability log, F1–F7 review fixes, and live Colab L4 specs.
+> **Status:** READY TO PUSH — Milestone 9 complete (fixed C9 `strict_line_hint` prompt echo on real Sakura-GalTransl-14B-v3.8, removed duplicate `LLAMA_ARG_LOG_VERBOSITY`, added asymmetric split-quote & heart-glyph normalization, changed `DISCONNECT_ON_ERROR` default to `False`, updated mock SSE strict prompt check; offline tests 6/6, 1.8k real-format stress test & sanitization passed)
+> **Session Postmortem & Full Context:** See [21_colab_session_postmortem.md](21_colab_session_postmortem.md) for the complete C1–C9 failure table, 7-item operator accountability log, F1–F7 review fixes, and live Colab L4 specs.
 
 ---
 
@@ -39,7 +39,7 @@ Replace the `vast.ai` rental workflow for the Japanese -> Traditional Chinese Ga
 | Exact size | `12,124,681,536` bytes |
 | Exact SHA-256 | `6e32fcf5bfdf78114745d2bf6bd87fb107ad7f68a611f4c2a886a4378846e334` |
 | Server | `llama.cpp` `b12019` (`llama-server`), `127.0.0.1:11434`, ctx `16384`, `-np 4`, `-ngl 999`, `--device CUDA0 --cont-batching` |
-| Sampling | `temperature=0.3` (retry `0.1`), `top_p=0.8`, `repeat_penalty=1.0`, `max_tokens=2048` (batch) / `512` (single), `stream=True` |
+| Sampling | `temperature=0.3` (retry `0.1`, gate `0.0`), `top_p=0.8`, `repeat_penalty=1.0`, `max_tokens=2048` (batch) / `512` (single), `stream=True` |
 | Traditional conversion | Default OpenCC `s2t` (per operator historical rule; `s2twp` selectable via `--tw-mode`) |
 
 ---
@@ -56,6 +56,7 @@ Replace the `vast.ai` rental workflow for the Japanese -> Traditional Chinese Ga
 | 2026-11-26 12:35 | Milestone 6: Complete Removal of Colab Build Code & Pinned Release Bundle | Done | Repacked official `ggml-org/llama.cpp` `b12019` Ubuntu x64 CUDA 12.8 `llama-server` + runtime `.so*` libs (`773,245,209` bytes, SHA-256 `802a169e33dde5e73403c2a36f3d6dbfd2d34d5e9ccd898e79a1eb899bcac947`, 43 entries) and published to GitHub Release `colab-l4-llama-b12019`. Removed ALL `git clone`/`cmake`/`--rebuild-bin`/`REBUILD_LLAMA_BIN` code from `runner.py` and `sakura_colab.ipynb`; updated `deploy_models_colab.ipynb` to deploy the pinned tarball directly to Drive `bin/` with dual SHA-256 verification; updated `README.md` & `AGENT_SOP_COLAB.md`. Re-ran `py_compile`, `test_all.py` (6/6), sanitization (0 hits) |
 | 2026-11-26 13:21 | Milestone 7: Fix `b12019` Log Verbosity (`-lv 4`) for Gate 2 GPU Offload Verification | Done | Live Colab L4 run passed Gate 0 (`NVIDIA L4 23034 MiB`), Drive prebuilt extraction (`llama-server-l4-b12019.tar.gz`), 12.12 GB SSD staging + SHA-256, Gate 1 (`CUDA0`), and 4.6 s model load, then failed Gate 2 (`parse_gpu_offload_log`). Root cause verified in `llama.log` + `b12019` `common/log.cpp`: `GGML_LOG_LEVEL_INFO` maps to `LOG_LEVEL_TRACE = 4`, while default verbosity is `3`, suppressing `offloaded X/Y layers to GPU`. Added `"-lv", "4"` + `LLAMA_ARG_LOG_VERBOSITY=4`, clean `proc.terminate()` + `llama.log` tail on Gate 2 errors, and `0.3 -> 0.1` temperature retry per sample in `run_preflight_gate`. Re-ran `py_compile`, `test_all.py` (6/6), sanitization (0 hits) |
 | 2026-11-26 13:35 | Milestone 8: Complete Code Review Fixes (F1, F2, F4, F5, F6, F7) | Done | Fixed all remaining review items prior to next live Colab L4 run: (F1) polled `llama.log` up to `10 x 0.5s` (`5s` max) in `start_and_verify_server` for `b12019` `common/log.cpp` async logger flush race; (F2) fixed `roundtrip_mismatches` tautology to compare `t2s(tw) != cn`; (F4) added `DISCONNECT_ON_ERROR = True` toggle in `sakura_colab.ipynb` so interactive watchers can preserve scarce L4 allocations on startup/gate errors; (F5) switched `drive_bridge.py` from `shutil.copy2` to `copyfile` for Drive FUSE safety and added informational `Prebuilt bin` readiness in `doctor`; (F6) fixed stale `building` comment in `main()`; (F7) moved `_log_gpu_progress` outside `ckpt_lock` under `gpu_log_lock`. Re-ran `py_compile`, `test_all.py` (6/6), sanitization (0 hits) |
+| 2026-11-26 14:30 | Milestone 9: Fix Live Run #4 `strict_line_hint` Prompt Echo & Split-Quote/Default Fixes | Done | Live Colab L4 Run #4 passed Gate 0 (`NVIDIA L4 23034 MiB`), SSD copy (`249.2s`), Gate 1 (`CUDA0`), Gate 2 (`49/49 layers`), Gate 3 (`14378 MiB VRAM`), and real inference (`20.84 tok/s`), then failed Gate 4 sample 1 because `build_sakura_messages(..., strict_line_hint=True)` injected parenthetical line-count instructions after `：`, causing Sakura-GalTransl-14B-v3.8 to echo that line before the accurate translation. Removed `strict_line_hint` completely, added `(0.3, 0.1, 0.0)` gate fallback, removed redundant `LLAMA_ARG_LOG_VERBOSITY` env override, added asymmetric split-quote & heart-glyph normalization, switched `DISCONNECT_ON_ERROR` default to `False` in `sakura_colab.ipynb`, and tightened `test_all.py` mock server to HTTP 400 on any text between `：` and `\n`. Re-verified offline suite + 1,808-row stress test + sanitization (0 hits) |
 
 ---
 
@@ -63,8 +64,9 @@ Replace the `vast.ai` rental workflow for the Japanese -> Traditional Chinese Ga
 
 | Check | State | Notes |
 |---|---|---|
-| `py_compile` on `schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py` | `done` (pass) | Executed after Milestone 8 edit |
-| Offline `test_all.py` (schema, BOM, normalization, mock SSE, `8->4->2->1` split retry, `ui` empty-history, deduplication, resume, `s2t` watch-chars & roundtrip, zero-compile prebuilt bundle + SHA-256 verification + zero `cmake`/`--rebuild-bin`, `-lv 4` assertion, OS metadata ignore, `drive_bridge.py`, `.ipynb` JSON + `ast.parse` + `runner.log` + `DEPLOY_LLAMA_BIN`) | `done` (6/6 pass) | Executed after Milestone 8 edit using local mock SSE & HTTP servers and temp dirs |
+| `py_compile` on `schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py` | `done` (pass) | Executed after Milestone 9 edit |
+| Offline `test_all.py` (schema, BOM, normalization, split-quote/heart normalization, strict GalTransl prompt HTTP 400 check, mock SSE, `8->4->2->1` split retry, `ui` empty-history, deduplication, resume, `s2t` watch-chars & roundtrip, zero-compile prebuilt bundle + SHA-256 verification + zero `cmake`/`--rebuild-bin`, `-lv 4` assertion, OS metadata ignore, `drive_bridge.py`, `.ipynb` JSON + `ast.parse` + `runner.log` + `DISCONNECT_ON_ERROR = False`) | `done` (6/6 pass) | Executed after Milestone 9 edit using local mock SSE & HTTP servers and temp dirs |
+| 1,808-record offline stress test (strict prompt guard + auto-closed asymmetric split quotes) | `done` (pass) | Executed against queued dataset in isolated temp dir (`missing=0`, `failures=0`, `roundtrip_mismatches=0`) |
 | Code review & sanitization audit | `done` (0 hits) | Verified zero secrets, zero local usernames/paths, zero copyrighted game strings, zero Docker CI triggers |
-| Live Colab L4 bootstrap (Gate 0, prebuilt `bin/` load, 12.12 GB SSD staging, Gate 1 `CUDA0`, model load) | `done` (pass) | Verified on real Colab L4 Run #3 prior to Milestone 7 `-lv 4` and Milestone 8 fixes |
-| Full live Colab L4 translation run (`sakura_colab.ipynb` post-Milestone 8) | `not tested` | Requires operator Colab L4 rerun after Milestone 8 push |
+| Live Colab L4 Gates 0–3 (`NVIDIA L4 23034 MiB`, `49/49 layers`, `14378 MiB VRAM`, `20.84 tok/s`) | `done` (pass on Run #4) | Verified on real Colab L4 Run #4 (`llama.log` + stdout) prior to Milestone 9 prompt fix |
+| Full live Colab L4 Gate 4 + end-to-end translation run (`sakura_colab.ipynb` post-Milestone 9) | `not tested` | Requires operator Colab L4 rerun after Milestone 9 push |

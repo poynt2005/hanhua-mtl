@@ -532,7 +532,6 @@ def start_and_verify_server(
             "LLAMA_ARG_CTX_SIZE": str(CTX_SIZE),
             "LLAMA_ARG_N_PARALLEL": str(N_PARALLEL),
             "LLAMA_ARG_UI": "0",
-            "LLAMA_ARG_LOG_VERBOSITY": "4",
         }
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -628,7 +627,6 @@ def build_sakura_messages(
     batch_units: list[dict[str, Any]],
     glossary_cn: list[dict[str, str]],
     history_lines: list[str],
-    strict_line_hint: bool = False,
 ) -> list[dict[str, str]]:
     is_ui_only = all(u["kind"] in ("ui", "system") for u in batch_units)
     hist_block = "\n".join(history_lines[-4:]) if (history_lines and not is_ui_only) else ""
@@ -644,9 +642,7 @@ def build_sakura_messages(
     parts = [
         f"历史翻译：\n{hist_block}",
         "参考以下术语表（可为空，格式为src->dst #备注）：\n" + "\n".join(term_lines),
-        "根据以上术语表的对应关系和备注，结合历史剧情和上下文，将下面的文本从日文翻译成简体中文："
-        + (f"（请严格输出恰好 {len(src_lines)} 行，一一对应，不要合并或拆分行）" if strict_line_hint else "")
-        + "\n"
+        "根据以上术语表的对应关系和备注，结合历史剧情和上下文，将下面的文本从日文翻译成简体中文：\n"
         + "\n".join(src_lines),
     ]
     return [
@@ -696,14 +692,46 @@ def normalize_output_line(
     unit: dict[str, Any],
     known_speakers_desc: list[str],
 ) -> tuple[str, str | None, list[str]]:
-    """Strip mirrored speaker prefixes, restore full-width indent, normalize t2s (never retry)."""
+    """Strip mirrored speaker prefixes, fix split-quote/heart drift, restore indent, normalize t2s (never retry)."""
     s = raw_line.strip()
     s = strip_speaker_prefix(s, unit, known_speakers_desc)
     s = strip_inner_speaker(s, unit, known_speakers_desc)
-    if unit["text"].startswith("\u3000") and not s.startswith("\u3000"):
+    flags: list[str] = []
+
+    src_text = unit["text"]
+    src_open = src_text.count("「")
+    src_close = src_text.count("」")
+    if (
+        src_open == 1
+        and src_close == 0
+        and src_text.startswith("「")
+        and s.count("「") == 1
+        and s.count("」") == 1
+        and s.startswith("「")
+        and s.endswith("」")
+    ):
+        s = s[:-1]
+        flags.append("trim_close_quote")
+    elif (
+        src_open == 0
+        and src_close == 1
+        and src_text.endswith("」")
+        and s.count("「") == 1
+        and s.count("」") == 1
+        and s.startswith("「")
+        and s.endswith("」")
+    ):
+        s = s[1:]
+        flags.append("trim_open_quote")
+
+    if "♥" in src_text and "♡" not in src_text and "♡" in s and "♥" not in s:
+        s = s.replace("♡", "♥")
+    elif "♡" in src_text and "♥" not in src_text and "♥" in s and "♡" not in s:
+        s = s.replace("♥", "♡")
+
+    if src_text.startswith("\u3000") and not s.startswith("\u3000"):
         s = "\u3000" + s.lstrip()
     canonical = to_simplified(s)
-    flags: list[str] = []
     raw_saved: str | None = None
     if canonical != s:
         flags.append("t2s")
@@ -737,10 +765,10 @@ def run_preflight_gate(api_base: str, min_tps: float = DEFAULT_MIN_TPS) -> None:
     total_tokens = 0
     total_sec = 0.0
     for idx, sample in enumerate(GATE_SAMPLES, start=1):
-        msgs = build_sakura_messages([sample], [], [], strict_line_hint=True)
+        msgs = build_sakura_messages([sample], [], [])
         last_err: str | None = None
         cn = ""
-        for temp in (0.3, 0.1):
+        for temp in (0.3, 0.1, 0.0):
             out, toks, elapsed = chat_stream(
                 api_base, MODEL_ALIAS, msgs, temperature=temp, top_p=0.8, max_tokens=512
             )
@@ -812,7 +840,6 @@ def _translate_single_multiline(
             [unit],
             glossary_cn,
             history if use_hist else [],
-            strict_line_hint=True,
         )
         try:
             raw, _, _ = chat_stream(
@@ -852,9 +879,7 @@ def _translate_batch_recursive(
     last_err: list[str] = ["unknown"]
     for idx, temp in enumerate(temps):
         use_hist = history if (len(batch) > 1 or idx < 2) else []
-        msgs = build_sakura_messages(
-            batch, glossary_cn, use_hist, strict_line_hint=(idx > 0)
-        )
+        msgs = build_sakura_messages(batch, glossary_cn, use_hist)
         try:
             raw, _, _ = chat_stream(
                 api_base,

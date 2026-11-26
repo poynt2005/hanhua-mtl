@@ -100,8 +100,18 @@ def _make_handler(state: _MockState):
             hist_content = hist_match.group(1).strip() if hist_match else ""
             marker = "将下面的文本从日文翻译成简体中文："
             idx = user_msg.find(marker)
+            if idx == -1:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"Missing Sakura prompt marker")
+                return
             after = user_msg[idx + len(marker):]
-            src_block = after.split("\n", 1)[1] if "\n" in after else ""
+            if not after.startswith("\n"):
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(f"Unexpected text after prompt marker: {after[:80]}".encode("utf-8"))
+                return
+            src_block = after[1:]
             src_lines = [ln for ln in src_block.splitlines() if ln.strip()]
 
             with state.lock:
@@ -207,9 +217,32 @@ class SakuraColabTests(unittest.TestCase):
         self.assertIn("t2s", flags2)
         self.assertEqual(runner.validate_unit_translation(u2["text"], cn2), [])
 
-        # Asymmetric split quotes must match source
+        # Asymmetric split quotes must match source, and auto-closed split quotes are normalized
         self.assertEqual(runner.validate_unit_translation("「今日は", "「今天也是"), [])
         self.assertIn("quote_asymmetry_mismatch", runner.validate_unit_translation("「今日は", "「今天也是」"))
+        u_open = {"kind": "dialogue", "speaker": "ユイ", "text": "「今日は"}
+        cn_open, _, flags_open = runner.normalize_output_line("由衣：「今天天气真好」", u_open, ["ユイ"])
+        self.assertEqual(cn_open, "「今天天气真好")
+        self.assertIn("trim_close_quote", flags_open)
+        self.assertEqual(runner.validate_unit_translation(u_open["text"], cn_open), [])
+        u_close = {"kind": "dialogue", "speaker": "ユイ", "text": "ありがとう」"}
+        cn_close, _, flags_close = runner.normalize_output_line("由衣：「谢谢你」", u_close, ["ユイ"])
+        self.assertEqual(cn_close, "谢谢你」")
+        self.assertIn("trim_open_quote", flags_close)
+        self.assertEqual(runner.validate_unit_translation(u_close["text"], cn_close), [])
+
+        # Heart glyph swap normalization (♥ <-> ♡) when source uses one exclusively
+        u_heart = {"kind": "dialogue", "speaker": "ユイ", "text": "あっ……♥"}
+        cn_heart, _, _ = runner.normalize_output_line("啊……♡", u_heart, ["ユイ"])
+        self.assertEqual(cn_heart, "啊……♥")
+        self.assertEqual(runner.validate_unit_translation(u_heart["text"], cn_heart), [])
+
+        # Official GalTransl v3.8 prompt must have nothing injected between ： and \n
+        msgs = runner.build_sakura_messages([u_open], [], [])
+        user_content = msgs[-1]["content"]
+        self.assertNotIn("请严格输出", user_content)
+        marker = "将下面的文本从日文翻译成简体中文："
+        self.assertTrue(user_content.split(marker, 1)[1].startswith("\n"))
 
         # Leading full-width indent restored
         u3 = {"kind": "narration", "speaker": None, "text": "\u3000静か。"}
@@ -235,7 +268,7 @@ class SakuraColabTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             runner.parse_gpu_offload_log("no offload line")
         runner_src = (HERE / "runner.py").read_text(encoding="utf-8")
-        self.assertIn("LLAMA_ARG_LOG_VERBOSITY", runner_src)
+        self.assertNotIn("LLAMA_ARG_LOG_VERBOSITY", runner_src)
         self.assertIn('"-lv", "4"', runner_src)
 
     def test_e2e_mock_sse_bridge_resume_and_qa(self):
@@ -441,7 +474,7 @@ class SakuraColabTests(unittest.TestCase):
             if nb_name == "sakura_colab.ipynb":
                 self.assertNotIn("REBUILD_LLAMA_BIN", full_src)
                 self.assertNotIn("--rebuild-bin", full_src)
-                self.assertIn("DISCONNECT_ON_ERROR", full_src)
+                self.assertIn("DISCONNECT_ON_ERROR = False", full_src)
             bridge_src = (HERE / "drive_bridge.py").read_text(encoding="utf-8")
             self.assertNotIn("copy2", bridge_src)
             for c in code_cells:
