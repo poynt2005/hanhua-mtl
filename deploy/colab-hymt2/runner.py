@@ -240,6 +240,8 @@ def ensure_llama_server(
             f"-DCMAKE_CUDA_COMPILER={nvcc_bin}",
             "-DCMAKE_CUDA_ARCHITECTURES=89;80",
             "-DLLAMA_OPENSSL=OFF",
+            "-DLLAMA_BUILD_UI=OFF",
+            "-DLLAMA_USE_PREBUILT_UI=OFF",
             "-DLLAMA_BUILD_TESTS=OFF",
             "-DLLAMA_BUILD_EXAMPLES=OFF",
             "-DBUILD_SHARED_LIBS=ON",
