@@ -613,7 +613,6 @@ def start_and_verify_server(
             "LLAMA_ARG_N_PARALLEL": str(N_PARALLEL),
             "LLAMA_ARG_JINJA": "1",
             "LLAMA_ARG_UI": "0",
-            "LLAMA_ARG_LOG_VERBOSITY": "4",
         }
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)

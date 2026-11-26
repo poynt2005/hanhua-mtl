@@ -192,7 +192,7 @@ class Hymt2ColabTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             runner.parse_gpu_offload_log("offloaded 10/49 layers to GPU")
         runner_src = (HERE / "runner.py").read_text(encoding="utf-8")
-        self.assertIn("LLAMA_ARG_LOG_VERBOSITY", runner_src)
+        self.assertNotIn("LLAMA_ARG_LOG_VERBOSITY", runner_src)
         self.assertIn('"-lv", "4"', runner_src)
 
     def test_e2e_mock_sse_bridge_fallback_resume_and_qa(self):
@@ -379,7 +379,7 @@ class Hymt2ColabTests(unittest.TestCase):
             if nb_name == "hymt2_colab.ipynb":
                 self.assertNotIn("REBUILD_LLAMA_BIN", full_src)
                 self.assertNotIn("--rebuild-bin", full_src)
-                self.assertIn("DISCONNECT_ON_ERROR", full_src)
+                self.assertIn("DISCONNECT_ON_ERROR = False", full_src)
             bridge_src = (HERE / "drive_bridge.py").read_text(encoding="utf-8")
             self.assertNotIn("copy2", bridge_src)
             for c in code_cells:
