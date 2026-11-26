@@ -568,13 +568,20 @@ def start_and_verify_server(
         proc.terminate()
         raise RuntimeError("Timed out waiting for llama-server /health and /v1/models")
 
-    log_txt = log_path.read_text(encoding="utf-8", errors="replace")
-    try:
-        offloaded, total = parse_gpu_offload_log(log_txt)
-    except Exception as exc:
-        proc.terminate()
-        tail = log_txt[-800:].strip()
-        raise RuntimeError(f"{exc}\n--- llama.log tail ---\n{tail}") from exc
+    # Poll briefly because llama.cpp common_log flushes via a background thread
+    log_txt = ""
+    offloaded, total = 0, 0
+    for attempt in range(10):
+        log_txt = log_path.read_text(encoding="utf-8", errors="replace")
+        try:
+            offloaded, total = parse_gpu_offload_log(log_txt)
+            break
+        except Exception as exc:
+            if attempt == 9:
+                proc.terminate()
+                tail = log_txt[-800:].strip()
+                raise RuntimeError(f"{exc}\n--- llama.log tail ---\n{tail}") from exc
+            time.sleep(0.5)
     print(f"[gpu] Gate 2 PASS: offloaded {offloaded}/{total} layers to GPU")
 
     used_stats = query_gpu_stats()
@@ -1022,6 +1029,7 @@ def translate_job(
         queues = [items[i : i + step] for i in range(0, len(items), step)]
 
     ckpt_lock = threading.Lock()
+    gpu_log_lock = threading.Lock()
     progress_counter = {"count": len(done_map)}
     all_failures: list[dict[str, Any]] = []
 
@@ -1033,6 +1041,8 @@ def translate_job(
                 api_base, batch, glossary_cn, hist, known_speakers_desc
             )
             if ok_map:
+                should_log_gpu = False
+                cur_done = 0
                 with ckpt_lock:
                     with open(ckpt_path, "a", encoding="utf-8", newline="\n") as fh:
                         for wid, (cn, raw_saved, flags) in ok_map.items():
@@ -1046,9 +1056,12 @@ def translate_job(
                         fh.flush()
                     prev = progress_counter["count"]
                     progress_counter["count"] += len(ok_map)
-                    if (progress_counter["count"] // 50) > (prev // 50):
+                    cur_done = progress_counter["count"]
+                    should_log_gpu = (cur_done // 50) > (prev // 50)
+                if should_log_gpu:
+                    with gpu_log_lock:
                         _log_gpu_progress(
-                            progress_counter["count"], len(work_units), gpu_log, skip_gpu_check
+                            cur_done, len(work_units), gpu_log, skip_gpu_check
                         )
             q_failures.extend(fails)
         return q_failures
@@ -1100,10 +1113,10 @@ def translate_job(
         tw_rows.append({**base_out, "translation": tw_val})
 
     roundtrip_mismatches = 0
-    for tw_s in zh_tw_texts:
-        # Compare t2s round-trip stability on s2t output
-        if tw_mode == "s2t" and to_simplified(tw_s) != to_simplified(to_traditional(to_simplified(tw_s), "s2t")):
-            roundtrip_mismatches += 1
+    if tw_mode == "s2t":
+        for cn_s, tw_s in zip(zh_cn_texts, zh_tw_texts):
+            if to_simplified(tw_s) != cn_s:
+                roundtrip_mismatches += 1
 
     qa_summary = {
         "job": job,
@@ -1199,7 +1212,7 @@ def main(argv: list[str] | None = None) -> int:
             if not args.skip_gpu_check:
                 run_preflight_gate(api_base, min_tps=args.min_tps)
         else:
-            # Gate 0: fail fast before building llama-server or copying 12GB model if T4/CPU
+            # Gate 0: fail fast before staging prebuilt binary or copying 12GB model if T4/CPU
             if not args.skip_gpu_check:
                 stats0 = query_gpu_stats()
                 print(

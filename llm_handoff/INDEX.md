@@ -27,8 +27,9 @@ agent needs to continue seamlessly from the current state.
 | 14 | `14_thrashing_postmortem.md` | **read before changing anything**: how this project repeatedly broke its own fixes, every regression, the anti-patterns, and the loop that works instead |
 | 15 | `15_run_log.md` | **the full session, attempt by attempt**: every wrong diagnosis and its cost, the batch, the model upgrade, the detection over-call, the infrastructure failures, and the final state |
 | 20 | `20_sakura_colab_workflow.md` | **this branch (`sakura-ollama-colab`)**: Google Colab L4 + Google Drive 5TB one-click JA->ZH workflow, free CPU GGUF deployer, Option A `drive_bridge.py`, Agent migration SOP, offline tests & handoff log |
+| 21 | `21_colab_session_postmortem.md` | **full Colab session context & postmortem**: C1-C8 pitfalls, operator frustration & accountability log, code review fixes F1-F7, permanent guardrails & verified runtime facts |
 
-> This copy of `llm_handoff/` is on the `sakura-ollama-colab` side branch. Docs `01`-`15` are snapshots from the branch point and are **stale** for the manga pipeline (`master` is the source of truth for `master`). Read **`20_sakura_colab_workflow.md`** and `deploy/colab-sakura/` for everything on this branch.
+> This copy of `llm_handoff/` is on the `sakura-ollama-colab` side branch. Docs `01`-`15` are snapshots from the branch point and are **stale** for the manga pipeline (`master` is the source of truth for `master`). Read **`20_sakura_colab_workflow.md`**, **`21_colab_session_postmortem.md`**, and `deploy/colab-sakura/` for everything on this branch.
 
 ## Related documents (kept in place, not duplicated here)
 

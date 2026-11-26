@@ -223,6 +223,10 @@ class SakuraColabTests(unittest.TestCase):
         self.assertIn("heart_mismatch:♥", runner.validate_unit_translation("好き♥", "喜欢"))
         self.assertIn("template_leak", runner.validate_unit_translation("a", "<|im_start|>hi"))
 
+        # Roundtrip check detects true s2t divergence when t2s(tw) != cn
+        self.assertEqual(runner.to_simplified(runner.to_traditional("头发和后来", "s2t")), "头发和后来")
+        self.assertNotEqual(runner.to_simplified("頭髮"), "头髮")
+
     def test_gpu_offload_log_parser(self):
         ok_log = "llm_load_tensors: offloaded 49/49 layers to GPU\nmodel loaded"
         self.assertEqual(runner.parse_gpu_offload_log(ok_log), (49, 49))
@@ -437,6 +441,9 @@ class SakuraColabTests(unittest.TestCase):
             if nb_name == "sakura_colab.ipynb":
                 self.assertNotIn("REBUILD_LLAMA_BIN", full_src)
                 self.assertNotIn("--rebuild-bin", full_src)
+                self.assertIn("DISCONNECT_ON_ERROR", full_src)
+            bridge_src = (HERE / "drive_bridge.py").read_text(encoding="utf-8")
+            self.assertNotIn("copy2", bridge_src)
             for c in code_cells:
                 src = "".join(c["source"])
                 cleaned = "\n".join(
