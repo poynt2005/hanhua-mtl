@@ -1,10 +1,10 @@
 # 20 — Sakura Colab Workflow (`sakura-ollama-colab`)
 
 > **Branch:** `sakura-ollama-colab` (branched from `origin/sakura-ollama` at `a94c8fb`)
-> **Updated:** 2026-11-26 12:01 +08:00
+> **Updated:** 2026-11-26 12:20 +08:00
 > **Agent:** Antigravity
 > **Model:** Gemini 4 Neon
-> **Status:** READY TO PUSH — Milestone 4 complete (disabled `LLAMA_BUILD_UI` & `LLAMA_USE_PREBUILT_UI` for `b12019` shallow clone; offline tests & sanitization passed)
+> **Status:** READY TO PUSH — Milestone 5 complete (prebuilt-first zero-compile resolution + fail-fast refusing silent L4 build + Free-CPU binary pre-caching; offline tests 6/6 & sanitization passed)
 
 ---
 
@@ -51,6 +51,7 @@ Replace the `vast.ai` rental workflow for the Japanese -> Traditional Chinese Ga
 | 2026-11-26 01:28 | Milestone 2: Code Review, Offline Tests & Sanitization | Done | Fixed 5 review items (closed `llama.log` parent fd, simplified fallback `build/bin` search, removed redundant ternary, added Drive glossary warning on `push` without `--glossary`, wrapped `drive.flush_and_unmount()` in `try/except` inside notebooks so `runtime.unassign()` always executes). `py_compile` + `test_all.py` (5/5 tests) passed; sanitization scan 0 hits |
 | 2026-11-26 11:51 | Milestone 3: Live Colab Failure Fix | Done | First real Colab run exited rc=1 silently with empty `bin/` and `work/` (notebook `subprocess.run` hid child stdout/stderr and saved no `runner.log`, while `b12019` CMake had `LLAMA_OPENSSL=ON` + deprecated `LLAMA_CURL`). Fixed: live-streamed `Popen` + tee to `sakura/work/runner.log` + tail in exception; explicit `_find_nvcc()` + `-DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF`; Gate 0 VRAM check moved before build/staging; `stage_model` copies once to NVMe then verifies SHA-256; replaced `copy2` with `copyfile` and ignored `OSError` on `fsync` for Drive FUSE; ignored OS metadata files in `input/`. `py_compile` + `test_all.py` (5/5) + sanitization (0 hits) passed |
 | 2026-11-26 12:01 | Milestone 4: Fix `b12019` `llama-ui-assets` CMake Failure | Done | Live Colab `runner.log` showed `cmake --build` failed at `llama-ui-assets` (`ui_validate_assets`: shallow `--depth 1` clone produced `b1`, fell back to `ggml-org/llama-ui/resolve/latest/dist.tar.gz`, mismatching `b12019` `bundle[hash].js` check). Verified in `b12019` `scripts/ui-assets.cmake` and added `-DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF` (`n_assets == 0` early return). Re-ran `py_compile`, `test_all.py` (5/5), sanitization (0 hits) |
+| 2026-11-26 12:20 | Milestone 5: Prebuilt-First Zero-Compile `llama-server` & Free-CPU Pre-Caching | Done | Eliminated slow paid-L4 compilation by switching `ensure_llama_server` to 4 prebuilt tiers: (1A) exact env-hash Drive cache, (1B) compatible `llama-server-l4-b12019.tar.gz` / other Drive `bin/` bundle verified via `--version` + `--list-devices` CUDA check, (2A) project GitHub Release `colab-l4-llama-b12019` with SHA-256 verification, (2B) official `ggml-org/llama.cpp` `b12019` Ubuntu CUDA 12.8 + `cudart` prebuilt archives (exact byte size + SHA-256 verified) repacked to Drive `bin/`. Fail-fast error refuses silent source compile unless `--rebuild-bin` (`REBUILD_BIN=True`) is explicitly set. Added `DEPLOY_LLAMA_BIN = True` free-CPU pre-caching to `deploy_models_colab.ipynb`. Re-ran `py_compile`, `test_all.py` (6/6), sanitization (0 hits) |
 
 ---
 
@@ -58,7 +59,7 @@ Replace the `vast.ai` rental workflow for the Japanese -> Traditional Chinese Ga
 
 | Check | State | Notes |
 |---|---|---|
-| `py_compile` on `schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py` | `done` (pass) | Executed after Milestone 4 edit |
-| Offline `test_all.py` (schema, BOM, normalization, mock SSE, `8->4->2->1` split retry, `ui` empty-history, deduplication, resume, `s2t` watch-chars & roundtrip, OS metadata ignore, `drive_bridge.py`, `.ipynb` JSON + `ast.parse` + `runner.log` streaming) | `done` (5/5 pass) | Executed after Milestone 4 edit using local mock SSE server and temp dirs |
+| `py_compile` on `schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py` | `done` (pass) | Executed after Milestone 5 edit |
+| Offline `test_all.py` (schema, BOM, normalization, mock SSE, `8->4->2->1` split retry, `ui` empty-history, deduplication, resume, `s2t` watch-chars & roundtrip, prebuilt tiers + fail-fast refuse silent compile + tampered SHA rejection, OS metadata ignore, `drive_bridge.py`, `.ipynb` JSON + `ast.parse` + `runner.log` + `DEPLOY_LLAMA_BIN`) | `done` (6/6 pass) | Executed after Milestone 5 edit using local mock SSE & HTTP servers and temp dirs |
 | Code review & sanitization audit | `done` (0 hits) | Verified zero secrets, zero local usernames/paths, zero copyrighted game strings, zero Docker CI triggers |
-| Live Google Colab L4 GPU run (`sakura_colab.ipynb` post-Milestone 4) | `not tested` | Second run captured full CMake error via Milestone 3 `runner.log`; ready for operator retry |
+| Live Google Colab L4 GPU run (`sakura_colab.ipynb` post-Milestone 5) | `not tested` | Requires operator Colab L4 execution against updated prebuilt-first `runner.py` |

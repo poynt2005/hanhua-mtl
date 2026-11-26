@@ -15,7 +15,7 @@
 ### 2. 在免費 CPU Colab 部署 GGUF 模型（0 GPU 額度）
 1. 用 Colab 帳號打開 Google Colab，匯入 `deploy/colab-sakura/deploy_models_colab.ipynb`。
 2. 確認右上角執行階段為 **CPU（免費）**，按 **`Ctrl+F9` 全部執行**。
-3. 腳本會自動建立 `MyDrive/galgame_mtl/...` 目錄並拉取 `Sakura-Galtransl-14B-v3.8.gguf`（12.12 GB），通過雙重 SHA-256 校驗後才寫入正式檔名（亦可同時勾選 `DEPLOY_HYMT2` 一併部署英文模型）。
+3. 腳本會自動建立 `MyDrive/galgame_mtl/...` 目錄、拉取 `Sakura-Galtransl-14B-v3.8.gguf`（12.12 GB）並順手快取預編譯 L4 `llama-server`（CUDA `b12019`）到 `bin/`，全數通過雙重 SHA-256 校驗後才寫入正式檔名（亦可同時勾選 `DEPLOY_HYMT2` 一併部署英文模型）。
 
 ---
 
@@ -27,7 +27,7 @@
    python deploy/colab-sakura/drive_bridge.py push --input work/game.jsonl --glossary work/glossary.json --name game_01
    ```
 2. **你打開 `sakura_colab.ipynb`（確認選 L4 GPU）→ 按 `Ctrl+F9`：**
-   - 自動完成：編譯/快取 `llama-server`（CUDA `sm_89;80`）→ 模型複製到本地 SSD → **GPU 4 道硬鎖檢查**（拒跑 T4、驗證 100% 層數進 GPU、VRAM >= 12 GB、3 句 Gate >= 8 tok/s）→ 4 路並行 batch 8 翻譯＋斷點續傳 → `s2t` 簡轉繁與 QA → 寫入 `.DONE.json` → `flush_and_unmount()` → 自動斷線釋放 L4。
+   - 自動完成：**0 編譯**取得預編譯 `llama-server`（優先序：Drive `bin/` 快取 → 本專案 GitHub Release → 官方 `b12019` CUDA 12.8 預編譯包；若全失敗直接報錯停機，拒絕在付費 L4 上偷偷編譯，除非手動勾選 `REBUILD_BIN=True`）→ 模型複製到本地 SSD → **GPU 4 道硬鎖檢查**（拒跑 T4、驗證 100% 層數進 GPU、VRAM >= 12 GB、3 句 Gate >= 8 tok/s）→ 4 路並行 batch 8 翻譯＋斷點續傳 → `s2t` 簡轉繁與 QA → 寫入 `.DONE.json` → `flush_and_unmount()` → 自動斷線釋放 L4。
 3. **本機 Agent 驗收並拉回結果：**
    ```powershell
    python deploy/colab-sakura/drive_bridge.py status --name game_01

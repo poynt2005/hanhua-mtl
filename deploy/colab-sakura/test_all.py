@@ -7,15 +7,18 @@ from __future__ import annotations
 
 import ast
 import http.server
+import io
 import json
 import os
 import re
 import socketserver
 import sys
+import tarfile
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -342,6 +345,83 @@ class SakuraColabTests(unittest.TestCase):
             srv.shutdown()
             srv.server_close()
 
+    def test_prebuilt_binary_tiers(self):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            for name, data in (("bin/llama-server", b"#!/bin/sh\necho ok\n"), ("bin/libggml.so", b"so")):
+                ti = tarfile.TarInfo(name=name)
+                ti.size = len(data)
+                ti.mode = 0o755
+                tf.addfile(ti, io.BytesIO(data))
+        bundle_bytes = buf.getvalue()
+        bundle_sha = runner.hashlib.sha256(bundle_bytes).hexdigest()
+        req_count = [0]
+        serve_bad_sha = [False]
+
+        class BinHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                return
+
+            def do_GET(self):
+                req_count[0] += 1
+                if self.path.endswith(".sha256"):
+                    bad = "0" * 64 if serve_bad_sha[0] else bundle_sha
+                    body = f"{bad}  llama-server-l4-b12019.tar.gz\n".encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if self.path.endswith(".tar.gz"):
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(bundle_bytes)))
+                    self.end_headers()
+                    self.wfile.write(bundle_bytes)
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+        srv = _ThreadedHTTPServer(("127.0.0.1", 0), BinHandler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            url_tar = f"http://127.0.0.1:{port}/llama-server-l4-b12019.tar.gz"
+            url_sha = f"{url_tar}.sha256"
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                drive_root = root / "drive" / schema.DRIVE_ROOT_NAME
+                schema.ensure_drive_tree(drive_root)
+                local_bin = root / "local_bin"
+
+                with mock.patch.object(runner, "PREBUILT_RELEASE_URL", url_tar), \
+                     mock.patch.object(runner, "PREBUILT_RELEASE_SHA_URL", url_sha), \
+                     mock.patch.object(runner, "_env_cache_hash", return_value="hash_a"), \
+                     mock.patch.object(runner, "_verify_llama_binary", return_value=True), \
+                     mock.patch.object(runner, "_try_download_upstream_prebuilt", return_value=False):
+                    # 1) Empty Drive bin -> downloads from release URL & caches into Drive bin/
+                    exe = runner.ensure_llama_server(drive_root, local_bin, force_rebuild=False)
+                    self.assertTrue(exe.is_file())
+                    self.assertTrue((drive_root / "bin" / runner.PREBUILT_RELEASE_ASSET).is_file())
+                    self.assertEqual(req_count[0], 2)
+
+                    # 2) Different env hash -> reuses Drive generic prebuilt bundle with 0 HTTP calls
+                    with mock.patch.object(runner, "_env_cache_hash", return_value="hash_b"):
+                        exe2 = runner.ensure_llama_server(drive_root, local_bin, force_rebuild=False)
+                    self.assertTrue(exe2.is_file())
+                    self.assertEqual(req_count[0], 2)
+
+                    # 3) Bad SHA on fresh Drive -> fail fast, refuse silent source compile
+                    fresh_drive = root / "drive2" / schema.DRIVE_ROOT_NAME
+                    schema.ensure_drive_tree(fresh_drive)
+                    serve_bad_sha[0] = True
+                    with self.assertRaises(RuntimeError) as ctx:
+                        runner.ensure_llama_server(fresh_drive, root / "local_bin2", force_rebuild=False)
+                    self.assertIn("prebuilt", str(ctx.exception).lower())
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
     def test_notebooks_valid_json_and_python_syntax(self):
         for nb_name in ("deploy_models_colab.ipynb", "sakura_colab.ipynb"):
             nb_path = HERE / nb_name
@@ -349,6 +429,10 @@ class SakuraColabTests(unittest.TestCase):
             self.assertEqual(nb["nbformat"], 4)
             code_cells = [c for c in nb["cells"] if c["cell_type"] == "code"]
             self.assertGreaterEqual(len(code_cells), 2)
+            full_src = "\n".join("".join(c["source"]) for c in code_cells)
+            if nb_name == "deploy_models_colab.ipynb":
+                self.assertIn("DEPLOY_LLAMA_BIN", full_src)
+                self.assertIn("llama-b12019-bin-ubuntu-cuda-12.8-x64.tar.gz", full_src)
             for c in code_cells:
                 src = "".join(c["source"])
                 cleaned = "\n".join(
