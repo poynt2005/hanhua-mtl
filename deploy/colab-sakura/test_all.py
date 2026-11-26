@@ -289,6 +289,10 @@ class SakuraColabTests(unittest.TestCase):
                     encoding="utf-8",
                 )
 
+                # OS metadata files in input/ must be ignored safely
+                (dirs["sakura_input"] / "desktop.ini").write_text("[.ShellClassInfo]\n", encoding="utf-8")
+                (dirs["sakura_input"] / ".DS_Store").write_bytes(b"\x00")
+
                 rc = runner.main(
                     ["--drive-root", str(drive_root), "--api-base", api_base,
                      "--manifest-wait", "0", "--min-tps", "1.0"]
@@ -351,6 +355,8 @@ class SakuraColabTests(unittest.TestCase):
                     ln for ln in src.splitlines() if not ln.lstrip().startswith(("!", "%"))
                 )
                 ast.parse(cleaned, filename=nb_name)
+                if nb_name == "sakura_colab.ipynb" and "Popen" in src:
+                    self.assertIn("runner.log", src)
 
 
 if __name__ == "__main__":

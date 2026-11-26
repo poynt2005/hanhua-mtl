@@ -1,10 +1,10 @@
 # 20 — Sakura Colab Workflow (`sakura-ollama-colab`)
 
 > **Branch:** `sakura-ollama-colab` (branched from `origin/sakura-ollama` at `a94c8fb`)
-> **Updated:** 2026-11-26 01:28 +08:00
+> **Updated:** 2026-11-26 11:51 +08:00
 > **Agent:** Antigravity
 > **Model:** Gemini 4 Neon
-> **Status:** READY TO PUSH — Milestone 2 complete (code review, offline tests, and sanitization audit passed; live Colab L4 GPU run pending operator)
+> **Status:** READY TO PUSH — Milestone 3 complete (live Colab failure diagnostics & FUSE/CMake/logging fixes applied; offline tests & sanitization passed)
 
 ---
 
@@ -49,6 +49,7 @@ Replace the `vast.ai` rental workflow for the Japanese -> Traditional Chinese Ga
 |---|---|---|---|
 | 2026-11-26 01:25 | Milestone 1: Branch & Core Implementation | Done | Created `deploy/colab-sakura/` (`schema.py`, `runner.py`, `drive_bridge.py`, `deploy_models_colab.ipynb`, `sakura_colab.ipynb`, `AGENT_SOP_COLAB.md`, `skill/SKILL.md`, `README.md`, `test_all.py`) and updated `llm_handoff/INDEX.md` |
 | 2026-11-26 01:28 | Milestone 2: Code Review, Offline Tests & Sanitization | Done | Fixed 5 review items (closed `llama.log` parent fd, simplified fallback `build/bin` search, removed redundant ternary, added Drive glossary warning on `push` without `--glossary`, wrapped `drive.flush_and_unmount()` in `try/except` inside notebooks so `runtime.unassign()` always executes). `py_compile` + `test_all.py` (5/5 tests) passed; sanitization scan 0 hits |
+| 2026-11-26 11:51 | Milestone 3: Live Colab Failure Fix | Done | First real Colab run exited rc=1 silently with empty `bin/` and `work/` (notebook `subprocess.run` hid child stdout/stderr and saved no `runner.log`, while `b12019` CMake had `LLAMA_OPENSSL=ON` + deprecated `LLAMA_CURL`). Fixed: live-streamed `Popen` + tee to `sakura/work/runner.log` + tail in exception; explicit `_find_nvcc()` + `-DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF`; Gate 0 VRAM check moved before build/staging; `stage_model` copies once to NVMe then verifies SHA-256; replaced `copy2` with `copyfile` and ignored `OSError` on `fsync` for Drive FUSE; ignored OS metadata files in `input/`. `py_compile` + `test_all.py` (5/5) + sanitization (0 hits) passed |
 
 ---
 
@@ -56,7 +57,7 @@ Replace the `vast.ai` rental workflow for the Japanese -> Traditional Chinese Ga
 
 | Check | State | Notes |
 |---|---|---|
-| `py_compile` on `schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py` | `done` (pass) | Executed after final edit |
-| Offline `test_all.py` (schema, BOM, normalization, mock SSE, `8->4->2->1` split retry, `ui` empty-history, deduplication, resume, `s2t` watch-chars & roundtrip, `drive_bridge.py`, `.ipynb` JSON + `ast.parse`) | `done` (5/5 pass) | Executed after final edit using local mock SSE server (`2180.5 tok/s` mock) and temp dirs |
+| `py_compile` on `schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py` | `done` (pass) | Executed after Milestone 3 edits |
+| Offline `test_all.py` (schema, BOM, normalization, mock SSE, `8->4->2->1` split retry, `ui` empty-history, deduplication, resume, `s2t` watch-chars & roundtrip, OS metadata ignore, `drive_bridge.py`, `.ipynb` JSON + `ast.parse` + `runner.log` streaming) | `done` (5/5 pass) | Executed after Milestone 3 edits using local mock SSE server and temp dirs |
 | Code review & sanitization audit | `done` (0 hits) | Verified zero secrets, zero local usernames/paths, zero copyrighted game strings, zero Docker CI triggers |
-| Live Google Colab L4 GPU run (`sakura_colab.ipynb` & `deploy_models_colab.ipynb`) | `not tested` | Requires operator Colab account & Drive mount after branch push |
+| Live Google Colab L4 GPU run (`sakura_colab.ipynb` post-Milestone 3) | `not tested` | First run hit Milestone 3 root causes before reaching `llama-server`; ready for operator retry |

@@ -107,7 +107,10 @@ def atomic_write_text(path: str | Path, content: str) -> Path:
         with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(content)
             handle.flush()
-            os.fsync(handle.fileno())
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
         os.replace(tmp, target)
     finally:
         if tmp.exists():
