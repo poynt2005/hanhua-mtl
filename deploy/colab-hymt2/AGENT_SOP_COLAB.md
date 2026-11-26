@@ -36,7 +36,7 @@
 
 ```text
 <Drive>:\我的雲端硬碟\galgame_mtl\
-├── bin\                   # Colab 自動快取編譯好的 llama-server (b12019, 支援 hy_v3 & sm_89)
+├── bin\                   # 預編譯 llama-server-l4-b12019.tar.gz（由 deploy_models_colab.ipynb 部署，零編譯）
 ├── models\
 │   └── Hy-MT2-30B-A3B-uncensored-heretic.i1-Q4_K_M.gguf   # 18,236,703,488 bytes
 ├── scripts\hymt2\         # drive_bridge.py push 自動同步最新 schema.py 與 runner.py
@@ -77,7 +77,7 @@ python deploy/colab-hymt2/drive_bridge.py push --input work/job.jsonl --glossary
 
 ### Phase 3：Colab L4 端自動執行內容
 1. 檢查 `.manifest.json` SHA-256（最多輪詢等待 60 秒讓 DriveAPP 同步完）。
-2. GPU 4 道硬檢：`nvidia-smi` >= `22,000 MiB`（拒跑 T4）→ `CUDA0` 可見 → `offloaded X/X layers to GPU` → VRAM 實佔 >= `18,000 MiB` → 3 句 Gate（日常 / 露骨 / 擬聲詞，0 拒答 0 `<think>`）且速度 `>= 8.0 tok/s`。
+2. 從 Drive `bin/` 解壓預編譯 `llama-server-l4-b12019.tar.gz`（若不存在則自動從本專案 GitHub Release 秒速下載並快取，Colab 全程零編譯）→ GPU 4 道硬檢：`nvidia-smi` >= `22,000 MiB`（拒跑 T4）→ `CUDA0` 可見 → `offloaded X/X layers to GPU` → VRAM 實佔 >= `18,000 MiB` → 3 句 Gate（日常 / 露骨 / 擬聲詞，0 拒答 0 `<think>`）且速度 `>= 8.0 tok/s`。
 3. 4 路並行翻譯＋斷點續傳；機械檢查失敗或拒答會先以官方 plain 模板重試一次，仍失敗記進 `failures.jsonl`。
 4. 產出 `zh_CN.jsonl`、`zh_TW.jsonl`（`s2twp`）、`qa_report.json`、`DONE.json`；`finally` 同步日誌、`drive.flush_and_unmount()`，若 `AUTO_DISCONNECT=True` 執行 `runtime.unassign()`。
 
