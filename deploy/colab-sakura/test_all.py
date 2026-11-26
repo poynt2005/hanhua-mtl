@@ -230,6 +230,9 @@ class SakuraColabTests(unittest.TestCase):
             runner.parse_gpu_offload_log("llm_load_tensors: offloaded 20/49 layers to GPU")
         with self.assertRaises(RuntimeError):
             runner.parse_gpu_offload_log("no offload line")
+        runner_src = (HERE / "runner.py").read_text(encoding="utf-8")
+        self.assertIn("LLAMA_ARG_LOG_VERBOSITY", runner_src)
+        self.assertIn('"-lv", "4"', runner_src)
 
     def test_e2e_mock_sse_bridge_resume_and_qa(self):
         state = _MockState(fail_batch_once=True)

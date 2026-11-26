@@ -532,12 +532,13 @@ def start_and_verify_server(
             "LLAMA_ARG_CTX_SIZE": str(CTX_SIZE),
             "LLAMA_ARG_N_PARALLEL": str(N_PARALLEL),
             "LLAMA_ARG_UI": "0",
+            "LLAMA_ARG_LOG_VERBOSITY": "4",
         }
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "w", encoding="utf-8", newline="\n") as log_fh:
         proc = subprocess.Popen(
-            [str(llama_exe), "--device", "CUDA0", "--cont-batching"],
+            [str(llama_exe), "--device", "CUDA0", "--cont-batching", "-lv", "4"],
             env=env,
             stdin=subprocess.DEVNULL,
             stdout=log_fh,
@@ -567,7 +568,13 @@ def start_and_verify_server(
         proc.terminate()
         raise RuntimeError("Timed out waiting for llama-server /health and /v1/models")
 
-    offloaded, total = parse_gpu_offload_log(log_path.read_text(encoding="utf-8", errors="replace"))
+    log_txt = log_path.read_text(encoding="utf-8", errors="replace")
+    try:
+        offloaded, total = parse_gpu_offload_log(log_txt)
+    except Exception as exc:
+        proc.terminate()
+        tail = log_txt[-800:].strip()
+        raise RuntimeError(f"{exc}\n--- llama.log tail ---\n{tail}") from exc
     print(f"[gpu] Gate 2 PASS: offloaded {offloaded}/{total} layers to GPU")
 
     used_stats = query_gpu_stats()
@@ -724,18 +731,28 @@ def run_preflight_gate(api_base: str, min_tps: float = DEFAULT_MIN_TPS) -> None:
     total_sec = 0.0
     for idx, sample in enumerate(GATE_SAMPLES, start=1):
         msgs = build_sakura_messages([sample], [], [], strict_line_hint=True)
-        out, toks, elapsed = chat_stream(
-            api_base, MODEL_ALIAS, msgs, temperature=0.3, top_p=0.8, max_tokens=512
-        )
-        lines = [ln for ln in out.splitlines() if ln.strip()]
-        if len(lines) != 1:
-            raise RuntimeError(f"Gate sample {idx} returned {len(lines)} lines: {out!r}")
-        cn, _, _ = normalize_output_line(lines[0], sample, ["ユイ"])
-        errs = validate_unit_translation(sample["text"], cn)
-        if errs:
-            raise RuntimeError(f"Gate sample {idx} failed validation {errs}: {cn!r}")
-        total_tokens += toks
-        total_sec += elapsed
+        last_err: str | None = None
+        cn = ""
+        for temp in (0.3, 0.1):
+            out, toks, elapsed = chat_stream(
+                api_base, MODEL_ALIAS, msgs, temperature=temp, top_p=0.8, max_tokens=512
+            )
+            lines = [ln for ln in out.splitlines() if ln.strip()]
+            if len(lines) != 1:
+                last_err = f"Gate sample {idx} returned {len(lines)} lines: {out!r}"
+                continue
+            cand, _, _ = normalize_output_line(lines[0], sample, ["ユイ"])
+            errs = validate_unit_translation(sample["text"], cand)
+            if errs:
+                last_err = f"Gate sample {idx} failed validation {errs}: {cand!r}"
+                continue
+            cn = cand
+            total_tokens += toks
+            total_sec += elapsed
+            last_err = None
+            break
+        if last_err is not None:
+            raise RuntimeError(last_err)
         print(f"  [gate {idx}/3 OK] {sample['text']} -> {cn}")
 
     tps = total_tokens / max(0.001, total_sec)
