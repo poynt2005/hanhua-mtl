@@ -40,7 +40,7 @@ Colab 端掛載於 `/content/drive/MyDrive/galgame_mtl`，Windows 桌面版會�
 
 ```text
 <Drive>:\我的雲端硬碟\galgame_mtl\
-├── bin\                   # Colab 自動快取編譯好的 llama-server（依 CUDA+GLIBC 雜湊）
+├── bin\                   # 預編譯 llama-server-l4-b12019.tar.gz（由 deploy_models_colab.ipynb 部署，零編譯）
 ├── models\
 │   └── Sakura-Galtransl-14B-v3.8.gguf   # 12,124,681,536 bytes (deploy_models_colab.ipynb 部署)
 ├── scripts\sakura\        # drive_bridge.py push 自動同步最新 schema.py 與 runner.py
@@ -100,7 +100,7 @@ python deploy/colab-sakura/drive_bridge.py doctor
 ### Phase 3：Colab L4 端自動執行內容（供 Agent 掌握全貌）
 使用者按下 `Ctrl+F9` 後，`runner.py` 會全自動執行：
 1. 讀 `.manifest.json` 比對輸入檔 SHA-256（若 Drive 桌面版尚未完全同步，最多輪詢等待 60 秒）。
-2. 確認 `nvidia-smi` 總顯存 >= `22,000 MiB`（拒絕 T4）、`llama-server --list-devices` 含 `CUDA0`、首次自動編譯並快取 `llama-server` 至 `bin/`、從 `models/` 循序複製 GGUF 到 `/content/models/`（絕不直接 mmap Drive FUSE）。
+2. 確認 `nvidia-smi` 總顯存 >= `22,000 MiB`（拒絕 T4）、從 Drive `bin/` 解壓預編譯 `llama-server-l4-b12019.tar.gz`（若不存在則自動從本專案 GitHub Release 秒速下載並快取，Colab 全程零編譯）、驗證 `--list-devices` 含 `CUDA0`、從 `models/` 循序複製 GGUF 到 `/content/models/`（絕不直接 mmap Drive FUSE）。
 3. 啟動 `llama-server`（ctx `16384`, `-np 4`, `-ngl 999`, `--device CUDA0 --cont-batching`），檢查日誌 `offloaded X/X layers to GPU` 且實佔 VRAM >= `12,000 MiB`。
 4. 執行 3 句 Gate 並要求生成速度 `>= 8.0 tok/s`。
 5. 以 `(kind, speaker, text)` 去重後分 4 路並行送 batch 8 翻譯；每批驗行數/假名/佔位符/`♥`/不對稱引號，失敗自動拆半（`8→4→2→1`）並於必要時清歷史重試；無法解決的句子寫入 `work/<job>.failures.jsonl`。

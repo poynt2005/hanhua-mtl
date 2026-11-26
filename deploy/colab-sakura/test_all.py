@@ -348,7 +348,7 @@ class SakuraColabTests(unittest.TestCase):
     def test_prebuilt_binary_tiers(self):
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-            for name, data in (("bin/llama-server", b"#!/bin/sh\necho ok\n"), ("bin/libggml.so", b"so")):
+            for name, data in (("llama-server", b"#!/bin/sh\necho ok\n"), ("libggml.so", b"so")):
                 ti = tarfile.TarInfo(name=name)
                 ti.size = len(data)
                 ti.mode = 0o755
@@ -356,7 +356,7 @@ class SakuraColabTests(unittest.TestCase):
         bundle_bytes = buf.getvalue()
         bundle_sha = runner.hashlib.sha256(bundle_bytes).hexdigest()
         req_count = [0]
-        serve_bad_sha = [False]
+        serve_tampered = [False]
 
         class BinHandler(http.server.BaseHTTPRequestHandler):
             def log_message(self, fmt, *args):
@@ -364,19 +364,12 @@ class SakuraColabTests(unittest.TestCase):
 
             def do_GET(self):
                 req_count[0] += 1
-                if self.path.endswith(".sha256"):
-                    bad = "0" * 64 if serve_bad_sha[0] else bundle_sha
-                    body = f"{bad}  llama-server-l4-b12019.tar.gz\n".encode("utf-8")
-                    self.send_response(200)
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                    return
                 if self.path.endswith(".tar.gz"):
+                    payload = b"X" * len(bundle_bytes) if serve_tampered[0] else bundle_bytes
                     self.send_response(200)
-                    self.send_header("Content-Length", str(len(bundle_bytes)))
+                    self.send_header("Content-Length", str(len(payload)))
                     self.end_headers()
-                    self.wfile.write(bundle_bytes)
+                    self.wfile.write(payload)
                     return
                 self.send_response(404)
                 self.end_headers()
@@ -386,38 +379,42 @@ class SakuraColabTests(unittest.TestCase):
         t = threading.Thread(target=srv.serve_forever, daemon=True)
         t.start()
         try:
-            url_tar = f"http://127.0.0.1:{port}/llama-server-l4-b12019.tar.gz"
-            url_sha = f"{url_tar}.sha256"
+            fake_spec = {
+                "filename": "llama-server-l4-b12019.tar.gz",
+                "size_bytes": len(bundle_bytes),
+                "sha256": bundle_sha,
+                "url": f"http://127.0.0.1:{port}/llama-server-l4-b12019.tar.gz",
+            }
             with tempfile.TemporaryDirectory() as td:
                 root = Path(td)
                 drive_root = root / "drive" / schema.DRIVE_ROOT_NAME
                 schema.ensure_drive_tree(drive_root)
                 local_bin = root / "local_bin"
 
-                with mock.patch.object(runner, "PREBUILT_RELEASE_URL", url_tar), \
-                     mock.patch.object(runner, "PREBUILT_RELEASE_SHA_URL", url_sha), \
-                     mock.patch.object(runner, "_env_cache_hash", return_value="hash_a"), \
-                     mock.patch.object(runner, "_verify_llama_binary", return_value=True), \
-                     mock.patch.object(runner, "_try_download_upstream_prebuilt", return_value=False):
-                    # 1) Empty Drive bin -> downloads from release URL & caches into Drive bin/
-                    exe = runner.ensure_llama_server(drive_root, local_bin, force_rebuild=False)
+                with mock.patch.object(runner, "PREBUILT_BIN_SPEC", fake_spec), \
+                     mock.patch.object(runner, "_verify_llama_binary", return_value=True):
+                    # 1) Empty Drive bin -> downloads from Release & caches into Drive bin/
+                    exe = runner.ensure_llama_server(drive_root, local_bin)
                     self.assertTrue(exe.is_file())
-                    self.assertTrue((drive_root / "bin" / runner.PREBUILT_RELEASE_ASSET).is_file())
-                    self.assertEqual(req_count[0], 2)
+                    self.assertTrue((drive_root / "bin" / fake_spec["filename"]).is_file())
+                    self.assertEqual(req_count[0], 1)
 
-                    # 2) Different env hash -> reuses Drive generic prebuilt bundle with 0 HTTP calls
-                    with mock.patch.object(runner, "_env_cache_hash", return_value="hash_b"):
-                        exe2 = runner.ensure_llama_server(drive_root, local_bin, force_rebuild=False)
+                    # 2) Second call -> reuses Drive bin/ with 0 HTTP calls
+                    exe2 = runner.ensure_llama_server(drive_root, local_bin)
                     self.assertTrue(exe2.is_file())
-                    self.assertEqual(req_count[0], 2)
+                    self.assertEqual(req_count[0], 1)
 
-                    # 3) Bad SHA on fresh Drive -> fail fast, refuse silent source compile
+                    # 3) Tampered archive -> fail fast, no compilation fallback
                     fresh_drive = root / "drive2" / schema.DRIVE_ROOT_NAME
                     schema.ensure_drive_tree(fresh_drive)
-                    serve_bad_sha[0] = True
+                    serve_tampered[0] = True
                     with self.assertRaises(RuntimeError) as ctx:
-                        runner.ensure_llama_server(fresh_drive, root / "local_bin2", force_rebuild=False)
-                    self.assertIn("prebuilt", str(ctx.exception).lower())
+                        runner.ensure_llama_server(fresh_drive, root / "local_bin2")
+                    self.assertIn("sha-256", str(ctx.exception).lower())
+
+            runner_src = (HERE / "runner.py").read_text(encoding="utf-8")
+            self.assertNotIn("cmake", runner_src)
+            self.assertNotIn("--rebuild-bin", runner_src)
         finally:
             srv.shutdown()
             srv.server_close()
@@ -432,7 +429,11 @@ class SakuraColabTests(unittest.TestCase):
             full_src = "\n".join("".join(c["source"]) for c in code_cells)
             if nb_name == "deploy_models_colab.ipynb":
                 self.assertIn("DEPLOY_LLAMA_BIN", full_src)
-                self.assertIn("llama-b12019-bin-ubuntu-cuda-12.8-x64.tar.gz", full_src)
+                self.assertIn("colab-l4-llama-b12019", full_src)
+                self.assertIn(runner.PREBUILT_BIN_SPEC["sha256"], full_src)
+            if nb_name == "sakura_colab.ipynb":
+                self.assertNotIn("REBUILD_LLAMA_BIN", full_src)
+                self.assertNotIn("--rebuild-bin", full_src)
             for c in code_cells:
                 src = "".join(c["source"])
                 cleaned = "\n".join(

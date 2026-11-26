@@ -37,29 +37,15 @@ if str(SCRIPT_DIR) not in sys.path:
 import schema  # noqa: E402
 
 LLAMA_TAG = "b12019"
-LLAMA_REPO = "https://github.com/ggml-org/llama.cpp.git"
-PREBUILT_RELEASE_TAG = "colab-l4-llama-b12019"
-PREBUILT_RELEASE_ASSET = f"llama-server-l4-{LLAMA_TAG}.tar.gz"
-PREBUILT_RELEASE_URL = (
-    f"https://github.com/poynt2005/hanhua-mtl/releases/download/"
-    f"{PREBUILT_RELEASE_TAG}/{PREBUILT_RELEASE_ASSET}"
-)
-PREBUILT_RELEASE_SHA_URL = f"{PREBUILT_RELEASE_URL}.sha256"
-
-UPSTREAM_PREBUILT_SPECS = [
-    {
-        "name": "llama-b12019-bin-ubuntu-cuda-12.8-x64.tar.gz",
-        "size_bytes": 182780961,
-        "sha256": "0295172839d1ff69c4e83d69b5cd3cad81442c463004495710de694968b7fab8",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12019/llama-b12019-bin-ubuntu-cuda-12.8-x64.tar.gz",
-    },
-    {
-        "name": "cudart-llama-b12019-bin-ubuntu-cuda-12.8-x64.tar.gz",
-        "size_bytes": 594370124,
-        "sha256": "842484ddbe6a6b29d9587b2295d0310ecf4e9825f28f129e019c4624168ec82e",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12019/cudart-llama-b12019-bin-ubuntu-cuda-12.8-x64.tar.gz",
-    },
-]
+PREBUILT_BIN_SPEC = {
+    "filename": f"llama-server-l4-{LLAMA_TAG}.tar.gz",
+    "size_bytes": 773245209,
+    "sha256": "802a169e33dde5e73403c2a36f3d6dbfd2d34d5e9ccd898e79a1eb899bcac947",
+    "url": (
+        f"https://github.com/poynt2005/hanhua-mtl/releases/download/"
+        f"colab-l4-llama-{LLAMA_TAG}/llama-server-l4-{LLAMA_TAG}.tar.gz"
+    ),
+}
 
 MODEL_SPEC = schema.MODELS["sakura"]
 MODEL_ALIAS = MODEL_SPEC["alias"]
@@ -158,38 +144,13 @@ def query_gpu_stats() -> dict[str, Any]:
     }
 
 
-def _find_nvcc() -> str:
-    nvcc = shutil.which("nvcc")
-    if nvcc:
-        return nvcc
-    fallback = Path("/usr/local/cuda/bin/nvcc")
-    if fallback.is_file():
-        return str(fallback)
-    raise RuntimeError("nvcc not found in PATH or /usr/local/cuda/bin/nvcc")
-
-
-def _env_cache_hash(llama_tag: str = LLAMA_TAG) -> str:
-    try:
-        nvcc_bin = _find_nvcc()
-        nvcc_out = subprocess.run(
-            [nvcc_bin, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace"
-        ).stdout
-    except Exception:
-        nvcc_out = "no-nvcc"
-    try:
-        ldd_out = subprocess.run(
-            ["ldd", "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace"
-        ).stdout.splitlines()[0:1]
-    except Exception:
-        ldd_out = ["no-ldd"]
-    sig = f"{llama_tag}|{nvcc_out.strip()}|{' '.join(ldd_out)}"
-    return hashlib.sha256(sig.encode("utf-8")).hexdigest()[:12]
-
-
 def _bin_env(local_bin_dir: Path) -> dict[str, str]:
     env = os.environ.copy()
     ld_prev = env.get("LD_LIBRARY_PATH", "")
-    env["LD_LIBRARY_PATH"] = f"{local_bin_dir}:{ld_prev}" if ld_prev else str(local_bin_dir)
+    parts = [str(local_bin_dir), "/usr/local/cuda/lib64"]
+    if ld_prev:
+        parts.append(ld_prev)
+    env["LD_LIBRARY_PATH"] = ":".join(parts)
     return env
 
 
@@ -310,29 +271,6 @@ def _extract_and_verify_bundle(tar_path: Path, local_bin_dir: Path) -> bool:
         shutil.rmtree(extract_tmp, ignore_errors=True)
 
 
-def _pack_and_cache_bundle(local_bin_dir: Path, cache_tar: Path, cache_sha: Path) -> None:
-    tmp_tar = local_bin_dir.parent / f".{cache_tar.name}.tmp"
-    tmp_drive_tar = cache_tar.with_name(f".{cache_tar.name}.tmp")
-    try:
-        with tarfile.open(tmp_tar, "w:gz") as tf:
-            for item in sorted(local_bin_dir.iterdir(), key=lambda p: p.name):
-                tf.add(item, arcname=item.name)
-        cache_tar.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(tmp_tar, tmp_drive_tar)
-        os.replace(tmp_drive_tar, cache_tar)
-        schema.atomic_write_text(cache_sha, f"{schema.sha256_file(cache_tar)}  {cache_tar.name}\n")
-    finally:
-        tmp_tar.unlink(missing_ok=True)
-        tmp_drive_tar.unlink(missing_ok=True)
-
-
-def _parse_sha256_text(text: str) -> str | None:
-    tok = text.strip().split()[0].lower() if text.strip() else ""
-    if len(tok) == 64 and all(ch in "0123456789abcdef" for ch in tok):
-        return tok
-    return None
-
-
 def _download_url_to_file(
     url: str,
     dst: Path,
@@ -371,183 +309,54 @@ def _download_url_to_file(
     return False
 
 
-def _try_drive_cache_bundle(tar_path: Path, local_bin_dir: Path) -> bool:
-    if not tar_path.is_file():
-        return False
-    sha_path = Path(f"{tar_path}.sha256")
-    if sha_path.is_file():
-        exp = _parse_sha256_text(sha_path.read_text(encoding="utf-8-sig", errors="replace"))
-        if not exp or schema.sha256_file(tar_path) != exp:
-            print(f"[bin] Drive cache sha256 mismatch: {tar_path.name}")
-            return False
-    return _extract_and_verify_bundle(tar_path, local_bin_dir)
+def ensure_llama_server(drive_root: Path, local_bin_dir: Path) -> Path:
+    local_bin_dir.mkdir(parents=True, exist_ok=True)
+    local_exe = local_bin_dir / "llama-server"
+    spec = PREBUILT_BIN_SPEC
+    filename = spec["filename"]
+    exp_size = int(spec["size_bytes"])
+    exp_sha = spec["sha256"]
+    cache_tar = drive_root / "bin" / filename
+    cache_sha = drive_root / "bin" / f"{filename}.sha256"
 
+    # Tier 1: Verified prebuilt bundle already in Drive bin/
+    if cache_tar.is_file():
+        sz = cache_tar.stat().st_size
+        if sz == exp_size and schema.sha256_file(cache_tar) == exp_sha:
+            print(f"[bin] Found verified Drive prebuilt bundle: {cache_tar.name}")
+            if _extract_and_verify_bundle(cache_tar, local_bin_dir):
+                print("[bin] Prebuilt llama-server verified OK")
+                return local_exe
+            raise RuntimeError(
+                f"Drive prebuilt bundle {cache_tar.name} failed CUDA binary verification."
+            )
+        print(f"[bin] Drive bundle size/SHA-256 mismatch ({sz} bytes); re-downloading from GitHub Release...")
 
-def _try_download_project_prebuilt(drive_root: Path, local_bin_dir: Path) -> bool:
+    # Tier 2: Download pinned prebuilt bundle from GitHub Release and cache to Drive bin/
     tmp_dir = local_bin_dir.parent / "_prebuilt_tmp"
     _clear_dir(tmp_dir)
     try:
-        sha_file = tmp_dir / f"{PREBUILT_RELEASE_ASSET}.sha256"
-        if not _download_url_to_file(PREBUILT_RELEASE_SHA_URL, sha_file, timeout=30, retries=2):
-            return False
-        exp_sha = _parse_sha256_text(sha_file.read_text(encoding="utf-8-sig", errors="replace"))
-        if not exp_sha:
-            print("[bin] Project prebuilt .sha256 invalid")
-            return False
-        tmp_tar = tmp_dir / PREBUILT_RELEASE_ASSET
-        print(f"[bin] Downloading project prebuilt {PREBUILT_RELEASE_ASSET}...")
-        if not _download_url_to_file(PREBUILT_RELEASE_URL, tmp_tar, timeout=300, retries=3):
-            return False
-        if schema.sha256_file(tmp_tar) != exp_sha:
-            print("[bin] Project prebuilt sha256 mismatch!")
-            return False
+        tmp_tar = tmp_dir / filename
+        print(f"[bin] Downloading prebuilt {filename} from GitHub Release...")
+        if not _download_url_to_file(spec["url"], tmp_tar, expected_size=exp_size, timeout=300, retries=3):
+            raise RuntimeError(f"Failed to download prebuilt llama-server from {spec['url']}")
+        got_sha = schema.sha256_file(tmp_tar)
+        if got_sha != exp_sha:
+            raise RuntimeError(f"Prebuilt llama-server SHA-256 mismatch: {got_sha} != {exp_sha}")
         if not _extract_and_verify_bundle(tmp_tar, local_bin_dir):
-            return False
-        cache_tar = drive_root / "bin" / PREBUILT_RELEASE_ASSET
-        cache_sha = drive_root / "bin" / f"{PREBUILT_RELEASE_ASSET}.sha256"
+            raise RuntimeError("Downloaded prebuilt llama-server failed CUDA binary verification.")
         cache_tar.parent.mkdir(parents=True, exist_ok=True)
         tmp_drive_tar = cache_tar.with_name(f".{cache_tar.name}.tmp")
         try:
             shutil.copyfile(tmp_tar, tmp_drive_tar)
             os.replace(tmp_drive_tar, cache_tar)
-            schema.atomic_write_text(cache_sha, f"{exp_sha}  {cache_tar.name}\n")
+            schema.atomic_write_text(cache_sha, f"{exp_sha}  {filename}\n")
         finally:
             tmp_drive_tar.unlink(missing_ok=True)
-        print(f"[bin] Cached project prebuilt binary to {cache_tar}")
-        return True
+        print(f"[bin] Cached prebuilt llama-server to {cache_tar}")
+        return local_exe
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-
-
-def _try_download_upstream_prebuilt(drive_root: Path, local_bin_dir: Path) -> bool:
-    tmp_dir = local_bin_dir.parent / "_upstream_tmp"
-    _clear_dir(tmp_dir)
-    ext_dir = tmp_dir / "extracted"
-    ext_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        for idx, spec in enumerate(UPSTREAM_PREBUILT_SPECS):
-            arc = tmp_dir / spec["name"]
-            print(f"[bin] Downloading official prebuilt: {spec['name']}...")
-            if not _download_url_to_file(
-                spec["url"], arc, expected_size=spec["size_bytes"], timeout=300, retries=3
-            ):
-                return False
-            got_sha = schema.sha256_file(arc)
-            if got_sha != spec["sha256"]:
-                print(f"[bin] Upstream sha256 mismatch on {spec['name']}: {got_sha}")
-                return False
-            _safe_extract_tar_gz(arc, ext_dir / f"arc_{idx}")
-            arc.unlink(missing_ok=True)
-        if not _collect_bin_files(ext_dir, local_bin_dir):
-            print("[bin] Official prebuilt archive missing llama-server")
-            return False
-        if not _verify_llama_binary(local_bin_dir / "llama-server", local_bin_dir):
-            return False
-        cache_tar = drive_root / "bin" / PREBUILT_RELEASE_ASSET
-        cache_sha = drive_root / "bin" / f"{PREBUILT_RELEASE_ASSET}.sha256"
-        _pack_and_cache_bundle(local_bin_dir, cache_tar, cache_sha)
-        print(f"[bin] Cached official CUDA 12.8 prebuilt binary to {cache_tar}")
-        return True
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-
-
-def ensure_llama_server(
-    drive_root: Path,
-    local_bin_dir: Path,
-    llama_tag: str = LLAMA_TAG,
-    force_rebuild: bool = False,
-) -> Path:
-    local_bin_dir.mkdir(parents=True, exist_ok=True)
-    local_exe = local_bin_dir / "llama-server"
-    env_hash = _env_cache_hash(llama_tag)
-    cache_tar = drive_root / "bin" / f"llama-server-l4-{env_hash}.tar.gz"
-    cache_sha = drive_root / "bin" / f"llama-server-l4-{env_hash}.tar.gz.sha256"
-
-    if not force_rebuild:
-        tried: set[Path] = set()
-        # Tier 1A: Exact env-hash Drive cache
-        if cache_tar.is_file():
-            tried.add(cache_tar)
-            print(f"[bin] Found env-matched Drive cache: {cache_tar.name}")
-            if _try_drive_cache_bundle(cache_tar, local_bin_dir):
-                print("[bin] Cached llama-server verified OK")
-                return local_exe
-
-        # Tier 1B: Generic prebuilt bundle or other Drive bin/*.tar.gz verified compatible
-        bin_dir = drive_root / "bin"
-        candidates: list[Path] = []
-        generic_bundle = bin_dir / PREBUILT_RELEASE_ASSET
-        if generic_bundle.is_file() and generic_bundle not in tried:
-            candidates.append(generic_bundle)
-        if bin_dir.is_dir():
-            others = sorted(
-                (p for p in bin_dir.glob("llama-server-l4-*.tar.gz") if p not in tried and p != generic_bundle),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            candidates.extend(others)
-        for cand in candidates:
-            print(f"[bin] Trying compatible Drive cache: {cand.name}")
-            if _try_drive_cache_bundle(cand, local_bin_dir):
-                print("[bin] Compatible Drive llama-server verified OK")
-                return local_exe
-
-        # Tier 2A: Project GitHub Release prebuilt bundle (single download + Drive cache)
-        if _try_download_project_prebuilt(drive_root, local_bin_dir):
-            return local_exe
-
-        # Tier 2B: Official llama.cpp b12019 Ubuntu CUDA 12.8 prebuilt + cudart + Drive cache
-        if _try_download_upstream_prebuilt(drive_root, local_bin_dir):
-            return local_exe
-
-        raise RuntimeError(
-            "All prebuilt llama-server tiers failed; refusing to silently compile on paid GPU. "
-            "Re-run with --rebuild-bin (REBUILD_BIN=True) only if you intentionally want a source build."
-        )
-
-    # Tier 3 (explicit opt-in --rebuild-bin / REBUILD_BIN=True ONLY)
-    build_src = Path("/content/_llama_src")
-    build_dir = build_src / "build"
-    if build_src.exists():
-        shutil.rmtree(build_src, ignore_errors=True)
-    print(f"[bin] Explicit rebuild requested: cloning llama.cpp {llama_tag} and building CUDA sm_80/89...")
-    subprocess.run(
-        ["git", "clone", "--depth", "1", "--branch", llama_tag, LLAMA_REPO, str(build_src)],
-        check=True,
-    )
-    nvcc_bin = _find_nvcc()
-    subprocess.run(
-        [
-            "cmake",
-            "-S",
-            str(build_src),
-            "-B",
-            str(build_dir),
-            "-DGGML_CUDA=ON",
-            f"-DCMAKE_CUDA_COMPILER={nvcc_bin}",
-            "-DCMAKE_CUDA_ARCHITECTURES=89;80",
-            "-DLLAMA_OPENSSL=OFF",
-            "-DLLAMA_BUILD_UI=OFF",
-            "-DLLAMA_USE_PREBUILT_UI=OFF",
-            "-DLLAMA_BUILD_TESTS=OFF",
-            "-DLLAMA_BUILD_EXAMPLES=OFF",
-            "-DBUILD_SHARED_LIBS=ON",
-        ],
-        check=True,
-    )
-    nproc = str(max(2, os.cpu_count() or 2))
-    subprocess.run(
-        ["cmake", "--build", str(build_dir), "--target", "llama-server", "-j", nproc],
-        check=True,
-    )
-
-    if not _collect_bin_files(build_dir, local_bin_dir):
-        raise RuntimeError(f"Built llama-server not found under {build_dir}")
-    _pack_and_cache_bundle(local_bin_dir, cache_tar, cache_sha)
-    shutil.rmtree(build_src, ignore_errors=True)
-    print(f"[bin] Cached built llama-server to {cache_tar}")
-    return local_exe
 
 
 def stage_model(drive_root: Path, local_models_dir: Path) -> Path:
@@ -1325,7 +1134,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skip-gpu-check", action="store_true")
     ap.add_argument("--manifest-wait", type=float, default=60.0)
     ap.add_argument("--min-tps", type=float, default=DEFAULT_MIN_TPS)
-    ap.add_argument("--rebuild-bin", action="store_true")
     args = ap.parse_args(argv)
 
     for s in (sys.stdout, sys.stderr):
@@ -1388,9 +1196,7 @@ def main(argv: list[str] | None = None) -> int:
             local_bin = Path("/content/bin")
             local_models = Path("/content/models")
             llama_log = Path("/content/llama.log")
-            llama_exe = ensure_llama_server(
-                dirs["root"], local_bin, force_rebuild=args.rebuild_bin
-            )
+            llama_exe = ensure_llama_server(dirs["root"], local_bin)
             model_path = stage_model(dirs["root"], local_models)
             proc, api_base = start_and_verify_server(
                 llama_exe, local_bin, model_path, llama_log, min_tps=args.min_tps
