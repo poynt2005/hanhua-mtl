@@ -613,6 +613,7 @@ def start_and_verify_server(
             "LLAMA_ARG_N_PARALLEL": str(N_PARALLEL),
             "LLAMA_ARG_JINJA": "1",
             "LLAMA_ARG_UI": "0",
+            "LLAMA_ARG_LOG_VERBOSITY": "4",
         }
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -622,6 +623,7 @@ def start_and_verify_server(
                 str(llama_exe),
                 "--device", "CUDA0",
                 "--cont-batching",
+                "-lv", "4",
                 "--temp", "0.7",
                 "--top-p", "1.0",
                 "--top-k", "0",
@@ -656,7 +658,13 @@ def start_and_verify_server(
         proc.terminate()
         raise RuntimeError("Timed out waiting for llama-server /health and /v1/models")
 
-    offloaded, total = parse_gpu_offload_log(log_path.read_text(encoding="utf-8", errors="replace"))
+    log_txt = log_path.read_text(encoding="utf-8", errors="replace")
+    try:
+        offloaded, total = parse_gpu_offload_log(log_txt)
+    except Exception as exc:
+        proc.terminate()
+        tail = log_txt[-800:].strip()
+        raise RuntimeError(f"{exc}\n--- llama.log tail ---\n{tail}") from exc
     print(f"[gpu] Gate 2 PASS: offloaded {offloaded}/{total} layers to GPU")
 
     used_stats = query_gpu_stats()

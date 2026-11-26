@@ -191,6 +191,9 @@ class Hymt2ColabTests(unittest.TestCase):
         )
         with self.assertRaises(RuntimeError):
             runner.parse_gpu_offload_log("offloaded 10/49 layers to GPU")
+        runner_src = (HERE / "runner.py").read_text(encoding="utf-8")
+        self.assertIn("LLAMA_ARG_LOG_VERBOSITY", runner_src)
+        self.assertIn('"-lv", "4"', runner_src)
 
     def test_e2e_mock_sse_bridge_fallback_resume_and_qa(self):
         state = _MockState()

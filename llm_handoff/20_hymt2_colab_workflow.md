@@ -1,10 +1,10 @@
 # 20 — Hy-MT2 Colab Workflow (`hymt2-heretic-colab`)
 
 > **Branch:** `hymt2-heretic-colab` (branched from `origin/hymt2-heretic` at `b10f481`)
-> **Updated:** 2026-11-26 12:33 +08:00
+> **Updated:** 2026-11-26 13:21 +08:00
 > **Agent:** Antigravity
 > **Model:** Gemini 4 Neon
-> **Status:** READY TO PUSH — Milestone 5 complete (zero-compile prebuilt CUDA 12.8 bundle on GitHub Release `colab-l4-llama-b12019`, all Colab compilation & `REBUILD_LLAMA_BIN` removed, `deploy_models_colab.ipynb` dual-SHA-256 binary deploy; offline tests 6/6 & sanitization passed)
+> **Status:** READY TO PUSH — Milestone 6 complete (ported `-lv 4` / `LLAMA_ARG_LOG_VERBOSITY=4` for `b12019` Gate 2 GPU offload log; offline tests 6/6 & sanitization passed)
 
 ---
 
@@ -52,6 +52,7 @@ Provide a foolproof **Google Colab L4 (24 GB) + Google Drive (5 TB) one-click wo
 | 2026-11-26 11:52 | Milestone 3: Colab Logging, CMake & Drive FUSE Parity Fixes | Done | Ported Milestone 3 fixes from `sakura-ollama-colab`: live `Popen` streaming + `hymt2/work/runner.log` tee + tail in exception; explicit `_find_nvcc()` + `-DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF`; early Gate 0 VRAM check; single-copy NVMe `stage_model` + SHA-256 verify; `copyfile` instead of `copy2` and `OSError`-safe `fsync` on Drive FUSE; OS metadata ignore in `input/`. `py_compile` + `test_all.py` (5/5) + sanitization (0 hits) passed |
 | 2026-11-26 12:02 | Milestone 4: Disable `llama-ui` Prebuilt Fetch for `b12019` | Done | Ported Milestone 4 fix from `sakura-ollama-colab` (`-DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF` so shallow-clone `b1` does not pull mismatched `latest` UI assets). Re-ran `py_compile`, `test_all.py` (5/5), sanitization (0 hits) |
 | 2026-11-26 12:33 | Milestone 5: Zero-Compile Prebuilt Bundle & Full Build Removal | Done | Eliminated ALL compilation from Colab: repacked official `ggml-org/llama.cpp` `b12019` Ubuntu x64 CUDA 12.8 `llama-server` + runtime `.so*` libs (`773,245,209` bytes, SHA-256 `802a169e33dde5e73403c2a36f3d6dbfd2d34d5e9ccd898e79a1eb899bcac947`, 43 entries) and published to GitHub Release `colab-l4-llama-b12019`. Removed `git clone`/`cmake`/`--rebuild-bin`/`REBUILD_LLAMA_BIN` from `runner.py` and `hymt2_colab.ipynb`; updated `deploy_models_colab.ipynb` to deploy the pinned tarball directly to Drive `bin/` with dual SHA-256 verification; updated `README.md` & `AGENT_SOP_COLAB.md`. Verified `py_compile`, `test_all.py` (6/6), sanitization (0 hits) |
+| 2026-11-26 13:21 | Milestone 6: Fix `b12019` Log Verbosity (`-lv 4`) for Gate 2 GPU Offload Verification | Done | Ported `-lv 4` + `LLAMA_ARG_LOG_VERBOSITY=4` + `proc.terminate()` + `llama.log` tail error reporting from `sakura-ollama-colab` (`b12019` `common/log.cpp` maps `GGML_LOG_LEVEL_INFO` to verbosity `4`, while default is `3`). Re-ran `py_compile`, `test_all.py` (6/6), sanitization (0 hits) |
 
 ---
 
@@ -59,7 +60,7 @@ Provide a foolproof **Google Colab L4 (24 GB) + Google Drive (5 TB) one-click wo
 
 | Check | State | Notes |
 |---|---|---|
-| `py_compile` on `schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py` | `done` (pass) | Executed after Milestone 5 edit |
-| Offline `test_all.py` (schema, `tw2sp`/`s2twp`, whole-word glossary, personalization + plain fallback, refusal, `ui` empty-style/context, deduplication, resume, watch-chars, zero-compile prebuilt bundle + SHA-256 verification + zero `cmake`/`--rebuild-bin` assertions, OS metadata ignore, `drive_bridge.py`, `.ipynb` JSON + `ast.parse` + `runner.log` + `DEPLOY_LLAMA_BIN`) | `done` (6/6 pass) | Executed after Milestone 5 edit using local mock SSE & HTTP servers and temp dirs |
+| `py_compile` on `schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py` | `done` (pass) | Executed after Milestone 6 edit |
+| Offline `test_all.py` (schema, `tw2sp`/`s2twp`, whole-word glossary, personalization + plain fallback, refusal, `ui` empty-style/context, deduplication, resume, watch-chars, zero-compile prebuilt bundle + SHA-256 verification + zero `cmake`/`--rebuild-bin` assertions + `-lv 4` assertion, OS metadata ignore, `drive_bridge.py`, `.ipynb` JSON + `ast.parse` + `runner.log` + `DEPLOY_LLAMA_BIN`) | `done` (6/6 pass) | Executed after Milestone 6 edit using local mock SSE & HTTP servers and temp dirs |
 | Code review & sanitization audit | `done` (0 hits) | Verified zero secrets, zero local usernames/paths, zero copyrighted game strings, zero Docker CI triggers |
 | Live Google Colab L4 GPU run (`hy_v3` load, English refusal rate, H-scene quality) | `not tested` | Requires operator Colab account & Drive mount after branch push |
