@@ -149,9 +149,20 @@ def query_gpu_stats() -> dict[str, Any]:
     }
 
 
+def _find_nvcc() -> str:
+    nvcc = shutil.which("nvcc")
+    if nvcc:
+        return nvcc
+    fallback = Path("/usr/local/cuda/bin/nvcc")
+    if fallback.is_file():
+        return str(fallback)
+    raise RuntimeError("nvcc not found in PATH or /usr/local/cuda/bin/nvcc")
+
+
 def _env_cache_hash(llama_tag: str = LLAMA_TAG) -> str:
+    nvcc_bin = _find_nvcc()
     nvcc_out = subprocess.run(
-        ["nvcc", "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace"
+        [nvcc_bin, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace"
     ).stdout
     ldd_out = subprocess.run(
         ["ldd", "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace"
@@ -217,6 +228,7 @@ def ensure_llama_server(
         ["git", "clone", "--depth", "1", "--branch", llama_tag, LLAMA_REPO, str(build_src)],
         check=True,
     )
+    nvcc_bin = _find_nvcc()
     subprocess.run(
         [
             "cmake",
@@ -225,8 +237,11 @@ def ensure_llama_server(
             "-B",
             str(build_dir),
             "-DGGML_CUDA=ON",
+            f"-DCMAKE_CUDA_COMPILER={nvcc_bin}",
             "-DCMAKE_CUDA_ARCHITECTURES=89;80",
-            "-DLLAMA_CURL=OFF",
+            "-DLLAMA_OPENSSL=OFF",
+            "-DLLAMA_BUILD_TESTS=OFF",
+            "-DLLAMA_BUILD_EXAMPLES=OFF",
             "-DBUILD_SHARED_LIBS=ON",
         ],
         check=True,
@@ -243,13 +258,18 @@ def ensure_llama_server(
         if found is None:
             raise RuntimeError(f"Built llama-server not found under {build_dir}")
         built_exe = found
-    shutil.copy2(built_exe, local_exe)
+    shutil.copyfile(built_exe, local_exe)
     local_exe.chmod(0o755)
     for so_file in (build_dir / "bin").glob("*.so*"):
-        shutil.copy2(so_file, local_bin_dir / so_file.name)
+        if so_file.is_file():
+            dst_so = local_bin_dir / so_file.name
+            if so_file.resolve() != dst_so.resolve():
+                shutil.copyfile(so_file, dst_so)
     for so_file in build_dir.rglob("*.so*"):
-        if not (local_bin_dir / so_file.name).exists():
-            shutil.copy2(so_file, local_bin_dir / so_file.name)
+        if so_file.is_file():
+            dst_so = local_bin_dir / so_file.name
+            if not dst_so.exists() and so_file.resolve() != dst_so.resolve():
+                shutil.copyfile(so_file, dst_so)
 
     tmp_tar = local_bin_dir.parent / f".{cache_tar.name}.tmp"
     with tarfile.open(tmp_tar, "w:gz") as tf:
@@ -257,7 +277,7 @@ def ensure_llama_server(
             tf.add(item, arcname=item.name)
     cache_tar.parent.mkdir(parents=True, exist_ok=True)
     tmp_drive_tar = cache_tar.with_name(f".{cache_tar.name}.tmp")
-    shutil.copy2(tmp_tar, tmp_drive_tar)
+    shutil.copyfile(tmp_tar, tmp_drive_tar)
     os.replace(tmp_drive_tar, cache_tar)
     schema.atomic_write_text(cache_sha, f"{schema.sha256_file(cache_tar)}  {cache_tar.name}\n")
     tmp_tar.unlink(missing_ok=True)
@@ -278,26 +298,32 @@ def stage_model(drive_root: Path, local_models_dir: Path) -> Path:
             f"Drive model size mismatch: {actual_size} != {MODEL_SPEC['size_bytes']}. "
             "Re-run deploy_models_colab.ipynb."
         )
-    print(f"[model] Verifying Drive SHA-256 for {drive_model.name}...")
-    drive_sha = schema.sha256_file(drive_model)
-    if drive_sha != MODEL_SPEC["sha256"]:
-        raise RuntimeError(
-            f"Drive model SHA-256 mismatch: {drive_sha} != {MODEL_SPEC['sha256']}. "
-            "Re-run deploy_models_colab.ipynb."
-        )
 
     local_models_dir.mkdir(parents=True, exist_ok=True)
     local_model = local_models_dir / MODEL_SPEC["filename"]
     if local_model.is_file() and local_model.stat().st_size == MODEL_SPEC["size_bytes"]:
-        print(f"[model] Local SSD model already staged: {local_model}")
-        return local_model
+        if schema.sha256_file(local_model) == MODEL_SPEC["sha256"]:
+            print(f"[model] Local SSD model already staged & verified: {local_model}")
+            return local_model
+        local_model.unlink(missing_ok=True)
 
     tmp_local = local_model.with_name(f".{local_model.name}.tmp")
     print(f"[model] Staging {MODEL_SPEC['size_bytes'] / 1e9:.2f} GB from Drive to local SSD...")
     t0 = time.monotonic()
     shutil.copyfile(drive_model, tmp_local)
+    print(f"[model] Copied to SSD in {time.monotonic() - t0:.1f}s; verifying SHA-256 locally...")
+    if tmp_local.stat().st_size != MODEL_SPEC["size_bytes"]:
+        tmp_local.unlink(missing_ok=True)
+        raise RuntimeError("Local staged model size mismatch after copy")
+    local_sha = schema.sha256_file(tmp_local)
+    if local_sha != MODEL_SPEC["sha256"]:
+        tmp_local.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Model SHA-256 mismatch: {local_sha} != {MODEL_SPEC['sha256']}. "
+            "Re-run deploy_models_colab.ipynb."
+        )
     os.replace(tmp_local, local_model)
-    print(f"[model] Staged in {time.monotonic() - t0:.1f}s -> {local_model}")
+    print(f"[model] Staged & SHA-256 verified -> {local_model}")
     return local_model
 
 
@@ -887,6 +913,8 @@ def main(argv: list[str] | None = None) -> int:
     for p in sorted(input_dir.iterdir()):
         if not p.is_file():
             continue
+        if p.name.startswith(".") or p.name.lower() == "desktop.ini":
+            continue
         if p.name.endswith(".manifest.json"):
             continue
         if p.suffix.lower() != ".jsonl":
@@ -894,7 +922,11 @@ def main(argv: list[str] | None = None) -> int:
                 f"Unexpected non-.jsonl file in {input_dir}: {p.name}. Remove it before running."
             )
 
-    job_files = sorted(p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() == ".jsonl")
+    job_files = sorted(
+        p
+        for p in input_dir.iterdir()
+        if p.is_file() and not p.name.startswith(".") and p.suffix.lower() == ".jsonl"
+    )
     if not job_files:
         print(f"[runner] No .jsonl jobs found in {input_dir}")
         return 0
@@ -913,6 +945,16 @@ def main(argv: list[str] | None = None) -> int:
             if not args.skip_gpu_check:
                 run_preflight_gate(api_base, min_tps=args.min_tps)
         else:
+            if not args.skip_gpu_check:
+                stats0 = query_gpu_stats()
+                print(
+                    f"[gpu] Gate 0: {stats0['name']} | total={stats0['memory_total_mib']:.0f} MiB"
+                )
+                if stats0["memory_total_mib"] < MIN_TOTAL_VRAM_MIB:
+                    raise RuntimeError(
+                        f"Gate 0 failed: GPU VRAM {stats0['memory_total_mib']:.0f} MiB < "
+                        f"{MIN_TOTAL_VRAM_MIB:.0f} MiB (likely T4/CPU instead of L4/A100)."
+                    )
             local_bin = Path("/content/bin")
             local_models = Path("/content/models")
             llama_log = Path("/content/llama.log")
@@ -951,7 +993,7 @@ def main(argv: list[str] | None = None) -> int:
         local_log = Path("/content/llama.log")
         if local_log.is_file():
             try:
-                shutil.copy2(local_log, work_dir / "llama.log")
+                shutil.copyfile(local_log, work_dir / "llama.log")
             except OSError:
                 pass
 

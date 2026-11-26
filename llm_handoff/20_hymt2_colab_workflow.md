@@ -1,10 +1,10 @@
 # 20 — Hy-MT2 Colab Workflow (`hymt2-heretic-colab`)
 
 > **Branch:** `hymt2-heretic-colab` (branched from `origin/hymt2-heretic` at `b10f481`)
-> **Updated:** 2026-11-26 01:32 +08:00
+> **Updated:** 2026-11-26 11:52 +08:00
 > **Agent:** Antigravity
 > **Model:** Gemini 4 Neon
-> **Status:** READY TO PUSH — Milestone 2 complete (code review, offline tests, and sanitization audit passed; live Colab L4 GPU run pending operator)
+> **Status:** READY TO PUSH — Milestone 3 complete (live Colab diagnostics & FUSE/CMake/logging parity fixes applied; offline tests & sanitization passed)
 
 ---
 
@@ -49,6 +49,7 @@ Provide a foolproof **Google Colab L4 (24 GB) + Google Drive (5 TB) one-click wo
 |---|---|---|---|
 | 2026-11-26 01:30 | Milestone 1: Branch & Core Implementation | Done | Created `deploy/colab-hymt2/` (`schema.py`, `runner.py`, `drive_bridge.py`, `deploy_models_colab.ipynb`, `hymt2_colab.ipynb`, `AGENT_SOP_COLAB.md`, `skill/SKILL.md`, `README.md`, `test_all.py`) and updated `llm_handoff/INDEX.md` |
 | 2026-11-26 01:32 | Milestone 2: Code Review, Offline Tests & Sanitization | Done | Verified `b12019` `LLAMA_ARG_*` env vars, `tw2sp`/`s2twp` one-to-many watch-char behavior (`干/發/後`), `llama.log` fd closure, `try/except` around `drive.flush_and_unmount()`, and Drive glossary presence warning. `py_compile` + `test_all.py` (5/5 tests) passed; sanitization scan 0 hits |
+| 2026-11-26 11:52 | Milestone 3: Colab Logging, CMake & Drive FUSE Parity Fixes | Done | Ported Milestone 3 fixes from `sakura-ollama-colab`: live `Popen` streaming + `hymt2/work/runner.log` tee + tail in exception; explicit `_find_nvcc()` + `-DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF`; early Gate 0 VRAM check; single-copy NVMe `stage_model` + SHA-256 verify; `copyfile` instead of `copy2` and `OSError`-safe `fsync` on Drive FUSE; OS metadata ignore in `input/`. `py_compile` + `test_all.py` (5/5) + sanitization (0 hits) passed |
 
 ---
 
@@ -56,7 +57,7 @@ Provide a foolproof **Google Colab L4 (24 GB) + Google Drive (5 TB) one-click wo
 
 | Check | State | Notes |
 |---|---|---|
-| `py_compile` on `schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py` | `done` (pass) | Executed after final edit |
-| Offline `test_all.py` (schema, `tw2sp`/`s2twp`, whole-word glossary, personalization + plain fallback, refusal, `ui` empty-style/context, deduplication, resume, watch-chars, `drive_bridge.py`, `.ipynb` JSON + `ast.parse`) | `done` (5/5 pass) | Executed after final edit using local mock SSE server and temp dirs |
+| `py_compile` on `schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py` | `done` (pass) | Executed after Milestone 3 edits |
+| Offline `test_all.py` (schema, `tw2sp`/`s2twp`, whole-word glossary, personalization + plain fallback, refusal, `ui` empty-style/context, deduplication, resume, watch-chars, OS metadata ignore, `drive_bridge.py`, `.ipynb` JSON + `ast.parse` + `runner.log` streaming) | `done` (5/5 pass) | Executed after Milestone 3 edits using local mock SSE server and temp dirs |
 | Code review & sanitization audit | `done` (0 hits) | Verified zero secrets, zero local usernames/paths, zero copyrighted game strings, zero Docker CI triggers |
 | Live Google Colab L4 GPU run (`hy_v3` load, English refusal rate, H-scene quality) | `not tested` | Requires operator Colab account & Drive mount after branch push |
