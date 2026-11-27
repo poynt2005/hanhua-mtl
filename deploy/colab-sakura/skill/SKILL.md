@@ -26,7 +26,7 @@ python deploy/colab-sakura/drive_bridge.py validate --input <job.jsonl> [--gloss
 python deploy/colab-sakura/drive_bridge.py push --input <job.jsonl> [--glossary <glossary.json>] --name <job>
 # -> STOP here and instruct user to run sakura_colab.ipynb on Google Colab L4 (Ctrl+F9).
 
-# 3. After user confirms Colab finished, check QA/DONE and pull verified files
+# 3. After user confirms Colab finished (either rc=0 DONE or rc=2 PARTIAL), check QA/DONE and pull verified files
 python deploy/colab-sakura/drive_bridge.py status --name <job>
 python deploy/colab-sakura/drive_bridge.py pull --name <job> --dest <out_dir>
 ```

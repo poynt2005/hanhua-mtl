@@ -27,8 +27,8 @@
    python deploy/colab-sakura/drive_bridge.py push --input work/game.jsonl --glossary work/glossary.json --name game_01
    ```
 2. **你打開 `sakura_colab.ipynb`（確認選 L4 GPU）→ 按 `Ctrl+F9`：**
-   - **Notebook 重要參數：** `AUTO_DISCONNECT = True`（成功即自動釋放 GPU）；`DISCONNECT_ON_ERROR = False`（預設錯後先同步日誌並印出 `STOP THE RUNTIME NOW` 方便除錯，並以 `IDLE_UNASSIGN_MINUTES = 15` 倒數自動斷線防止持續計費）；僅需補翻剩餘失敗句時可勾選 `REPAIR_ONLY = True` 並填 `TARGET_JOB`。
-   - **Colab 端完全不含任何編譯流程**，直接完成：從 Drive `bin/` 解壓預編譯 `llama-server-l4-b12019.tar.gz`（若缺失則從 GitHub Release 秒速下載並驗證 SHA-256 後寫回 Drive `bin/`）→ 模型複製到本地 SSD → **GPU 4 道硬鎖檢查**（拒跑 T4、驗證 100% 層數進 GPU、VRAM >= 12 GB、3 句 Gate >= 8 tok/s）→ 4 路並行 batch 8 翻譯＋SHA-1 `unit_key` 斷點續傳（含引號/佔位符/假名術語表/換行拆段修復、`<job>.overrides.jsonl` 透傳與 `no_cjk`/`latin_only` 語言 QA）→ `s2t` 簡轉繁與 QA → 全數通過始寫入 `.DONE.json` → `flush_and_unmount()` → 自動斷線釋放 L4。
+   - **Notebook 結束碼與斷線行為（方案 A）：** `rc = 0`（`[DONE]` 100% 通過並寫入 `.DONE.json` → 自動釋放 L4）；`rc = 2`（`[PARTIAL]` 全部句子皆已跑完並存檔至 `checkpoint.jsonl`/`failures.jsonl`，僅剩少數待補句 → **不噴紅字、不寫 `.DONE.json`、同步 Drive 後直接照 `AUTO_DISCONNECT=True` 自動釋放 L4 省點數**）；`rc = 1`（僅啟動 Gate 0–4／硬體／中途 server 崩潰才會拋錯並依 `DISCONNECT_ON_ERROR = False` 保留 L4 最多 `IDLE_UNASSIGN_MINUTES = 15` 分鐘除錯）。僅需補翻剩餘失敗句時可勾選 `REPAIR_ONLY = True` 並填 `TARGET_JOB`。
+   - **Colab 端完全不含任何編譯流程**，直接完成：從 Drive `bin/` 解壓預編譯 `llama-server-l4-b12019.tar.gz`（若缺失則從 GitHub Release 秒速下載並驗證 SHA-256 後寫回 Drive `bin/`）→ 模型複製到本地 SSD → **GPU 4 道硬鎖檢查**（拒跑 T4、驗證 100% 層數進 GPU、VRAM >= 12 GB、3 句 Gate >= 8 tok/s）→ 4 路並行 batch 8 翻譯＋SHA-1 `unit_key` 斷點續傳（含 Drive FUSE 5 次寫檔防抖重試、引號/佔位符/假名術語表/換行拆段修復、`<job>.overrides.jsonl` 透傳與 `no_cjk`/`latin_only` 語言 QA）→ `s2t` 簡轉繁與 QA → 視結果回傳 `0` / `2` → `flush_and_unmount()` → 自動斷線釋放 L4。
 3. **本機 Agent 驗收並拉回結果：**
    ```powershell
    python deploy/colab-sakura/drive_bridge.py status --name game_01
@@ -49,4 +49,4 @@
 | `drive_bridge.py` | 本機 Windows Agent 專用雲盤橋接 CLI（`doctor`/`validate`/`push`/`status`/`pull`） |
 | `AGENT_SOP_COLAB.md` | 給已讀過 `vast.ai` 過往範例的 Agent 看的完整遷移 SOP |
 | `skill/SKILL.md` | 可攜式 Agent Skill 定義 |
-| `test_all.py` | 完整離線單元與整合測試（15 項，含嚴格 Prompt Mock SSE、引號/佔位符/多行修復、語言 QA 與 `--repair-only`） |
+| `test_all.py` | 完整離線單元與整合測試（18 項，含嚴格 Prompt Mock SSE、引號/佔位符/多行修復、語言 QA、`--repair-only`、結束碼 `0/1/2` 與 Drive FUSE 重試） |

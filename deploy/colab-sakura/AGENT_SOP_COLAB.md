@@ -106,7 +106,7 @@ python deploy/colab-sakura/drive_bridge.py doctor
 3. 啟動 `llama-server`（ctx `16384`, `-np 4`, `-ngl 999`, `--device CUDA0 --cont-batching`），檢查日誌 `offloaded X/X layers to GPU` 且實佔 VRAM >= `12,000 MiB`。
 4. 執行 3 句 Gate 並要求生成速度 `>= 8.0 tok/s`。
 5. 以 `(kind, speaker, text)`（SHA-1 `unit_key`）去重並載入 checkpoint（相容舊版 `wid` 遷移），優先套用 `override` 欄位與 `<job>.overrides.jsonl`（直接走 `t2s` 透傳、免經 GPU），其餘分 4 路並行送 batch 8 翻譯；單句失敗會依錯誤類型僅在 `system` prompt 加入針對性重試指示（`user` prompt 尾端永遠維持官方原文格式），無法解決的句子寫入含 `unit_key`、`attempts`、`expected_placeholders`、`observed_placeholders`、`suggested_fix` 的 `work/<job>.failures.jsonl`。
-6. 當 `missing=0`、`failures=0`、`no_cjk=0`、`latin_only=0` 全數通過時才寫入 `output/<job>.DONE.json`；`finally` 必先 sync 日誌並 `drive.flush_and_unmount()`，成功時若 `AUTO_DISCONNECT=True` 立即 `runtime.unassign()`；失敗時預設 `DISCONNECT_ON_ERROR=False` 會印出 `STOP THE RUNTIME NOW` 並於 `IDLE_UNASSIGN_MINUTES=15` 後自動釋放 GPU 防呆。
+6. 當 `missing=0`、`failures=0`、`no_cjk=0`、`latin_only=0` 全數通過時才寫入 `output/<job>.DONE.json` 並回傳結束碼 **`0`（`EXIT_OK`）**；若全數單元已跑完、譯文／`checkpoint.jsonl`／`failures.jsonl` 均已寫入但仍有少數未通過項目（且 `llama-server` 未崩潰）則**不寫 `.DONE.json`** 並回傳結束碼 **`2`（`EXIT_PARTIAL`）**，Notebook 僅印出平靜的 `[PARTIAL]` 摘要、不拋 `RuntimeError`、同步 Drive 後照 `AUTO_DISCONNECT=True` 自動釋放 L4 省點數。唯有啟動 Gate 0–4、輸入檔異常、`checkpoint.jsonl` 連續 I/O 失敗或推論中 `llama-server` 意外終止才會回傳/拋錯 **`1`（`EXIT_FATAL`）**，`finally` 先 sync 日誌並 `drive.flush_and_unmount()`，且預設 `DISCONNECT_ON_ERROR=False` 會印出 `STOP THE RUNTIME NOW` 並於 `IDLE_UNASSIGN_MINUTES=15` 後自動釋放 GPU 防呆（中途寫入 `checkpoint.jsonl` 具 5 次指數退避重試，`gpu.log` 寫入失敗僅警告不中斷）。
 
 ### Phase 4：狀態檢查 → 增量修復（若需）→ 拉回驗證
 使用者告知 Colab 跑完後：

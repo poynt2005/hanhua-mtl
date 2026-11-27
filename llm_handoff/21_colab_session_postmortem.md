@@ -4,7 +4,7 @@
 > **Agent:** Antigravity
 > **Model:** Gemini 4 Neon
 > **Branches covered:** `sakura-ollama-colab` (from `origin/sakura-ollama` `a94c8fb`) and `hymt2-heretic-colab` (from `origin/hymt2-heretic` `b10f481`)
-> **Scope:** Complete session history from initial Colab migration through Milestone 11 (`sakura-ollama-colab`) and Milestone 10 (`hymt2-heretic-colab`)
+> **Scope:** Complete session history from initial Colab migration through Milestone 12 (`sakura-ollama-colab`) and Milestone 11 (`hymt2-heretic-colab`)
 
 ---
 
@@ -52,7 +52,7 @@ All domain rules established in prior `vast.ai` handoffs were preserved verbatim
 
 ---
 
-## 2. Exhaustive Pitfall & Failure Postmortem Table (C1–C11)
+## 2. Exhaustive Pitfall & Failure Postmortem Table (C1–C12)
 
 | ID | Phase / Event | What Failed & Root Cause | Resolution & Permanent Fix |
 |---|---|---|---|
@@ -67,12 +67,13 @@ All domain rules established in prior `vast.ai` handoffs were preserved verbatim
 | **C9** | Live Colab Run #4 (Gate 4 `strict_line_hint` echo + old notebook `DISCONNECT_ON_ERROR=True`) | Run #4 passed Gate 0 (`NVIDIA L4 23034 MiB`), SSD staging (`249.2s`), Gate 1 (`CUDA0`), Gate 2 (`49/49 layers`), and Gate 3 (`14378 MiB VRAM`, `llama.log` `20.84 tok/s`), then failed Gate 4 sample 1 with 2 lines: `'（请严格输出恰好 1 行，一一对应，不要合并或拆分行）\n唯：早上好。睡得好吗？'`. Root cause: `build_sakura_messages(..., strict_line_hint=True)` injected that parenthetical instruction directly after `将下面的文本从日文翻译成简体中文：`, whereas Sakura-GalTransl-14B-v3.8 is fine-tuned to treat everything after `：` as source input, so it echoed that line before producing the accurate translation; `test_all.py` `_make_handler` had masked it via `after.split("\n", 1)[1]`. Additionally, `DISCONNECT_ON_ERROR` defaulted to `True` in Run #4 so the operator's L4 session disconnected immediately; audit also found `LLAMA_ARG_LOG_VERBOSITY=4` alongside `-lv 4` emitted a harmless `llama.log` overwrite warning and real queued data contains 12 asymmetric split-quote lines (`open != close`) that could be rejected if the model closes/opens quotes. | Removed `strict_line_hint` completely so `build_sakura_messages` always emits exact official GalTransl v3.8 prompt syntax (`：\n`); added `(0.3, 0.1, 0.0)` gate retry; removed redundant `LLAMA_ARG_LOG_VERBOSITY` env var (keeping `-lv 4`); added asymmetric split-quote (`trim_close_quote`/`trim_open_quote`) and exclusive `♥`<->`♡` normalization in `normalize_output_line`; defaulted `DISCONNECT_ON_ERROR = False` in both `sakura_colab.ipynb` and `hymt2_colab.ipynb`; hardened `test_all.py` mock handler to HTTP 400 if any text appears between `：` and `\n`. |
 | **C10** | Large 14,269-row production run (`2,235` unique units) exposed 20 edge-case failures + 12 language-QA gaps | Run #5 succeeded on the first 1,808-row job (`24.2 tok/s`), but a 14,269-row production job (`2,235` unique units) finished `2,215` units with `20` hard failures (`46` missing rows) and `12` `no_cjk` / untranslated English rows not caught by existing checks: (1) sequential `wid` shifted whenever overrides were added, preventing safe incremental repair; (2) `repair_quotes` missed mid-sentence non-corner quotes, missing outer quote pairs, and half-width/curly quotes; (3) kana/loanword proper nouns hit `residual_kana` with no `overrides.jsonl` pass-through or glossary substitution path; (4) `{{TAG_n}}` drops lacked normalized `⟦0⟧` encoding and targeted system-prompt retries; (5) `\n` multiline units were prompted whole instead of segment-split and rejoined; (6) no `no_cjk`/`latin_only` QA gate existed to catch English loanword outputs or truncated text (`　」`); (7) `DISCONNECT_ON_ERROR=False` could leave an L4 idle without a bounded timer or explicit `STOP THE RUNTIME NOW` warning; (8) `failures.jsonl` lacked `unit_key`, `attempts`, `expected_placeholders`/`observed_placeholders`, and `suggested_fix`. | Implemented SHA-1 `unit_key` + legacy `wid` migration, generalized `repair_quotes`, internal `⟦0⟧` placeholder encode/decode, `overrides.jsonl` + glossary kana substitution, `\n` segment-split multiline handling, `no_cjk`/`latin_only` QA + verbatim command allowlist, `--repair-only`/`--job`/`--overrides` incremental repair, actionable `failures.jsonl`, and `IDLE_UNASSIGN_MINUTES=15` + `STOP THE RUNTIME NOW` warning in both `sakura_colab.ipynb` and `hymt2_colab.ipynb`. Verified with 15 offline tests + isolated 14,269-row repair dry-run (`cached=2215 | todo=20`). |
 | **C11** | Comprehensive regex & validator audit against all 14,269 real production rows + `hymt2_prompt.py` | Auditing every regex across both branches against real repaired data revealed 4 false-positive / fidelity bugs: (1) Sakura `_KANA_RE` (`\u30a0-\u30ff`) included non-letter punctuation (`・` `U+30FB`, `ー` `U+30FC`, `゠` `U+30A0`), falsely failing 9 valid Chinese translations (e.g. `HP・MP`) as `residual_kana`; (2) Sakura `normalize_output_line` collapsed multiple leading `\u3000` full-width indents down to 1 across 5 multi-indent rows; (3) Sakura `repair_quotes` lacked Chinese `《》` / `【】` title-quote repairs; (4) Hy-MT2 applied broad refusal words (`抱歉`/`无法`/`I'm sorry`/`I can't`) to normal dialogue in `mechanical_problems()` instead of restricting broad refusal matching to Gate 4 (`_GATE_REFUSAL_RE`). | Narrowed Sakura `_KANA_RE` & `_JA_PRESENT_RE` to real kana letters, preserved exact leading `\u3000` count, added `《》` / `【】` quote repair (verified 0 errors and 0 unintended mutations across all 14,269 real rows), and separated Hy-MT2 `_GATE_REFUSAL_RE` from strict AI-boilerplate `_REFUSAL_RE` in `mechanical_problems()`. |
+| **C12** | Conflated exit codes (`rc=1` on completed runs with partial failures) & unretried Drive FUSE appends | Conflating "all units finished with residual `failures.jsonl`/`no_cjk` items" with startup Gate/GPU/crash errors under exit code `1` caused a misleading red `RuntimeError` after full runs (making operators fear a mid-run crash) and left the L4 VM idling up to `IDLE_UNASSIGN_MINUTES=15` under `DISCONNECT_ON_ERROR=False`. Additionally, direct `open(ckpt_path, "a")` and `open(gpu_log, "a")` lacked `OSError` retry/isolation against transient Drive FUSE hiccups. | Split three exit codes (`EXIT_OK=0`, `EXIT_FATAL=1`, `EXIT_PARTIAL=2`) on both branches: partial completions omit `.DONE.json`, print calm `[PARTIAL]` summary without raising `RuntimeError`, and disconnect normally under `AUTO_DISCONNECT`; added mid-run `llama-server` crash guard (`proc.poll() is not None`), 5-attempt Drive FUSE checkpoint retry (`_append_checkpoint_rows`, committing `done_map` only after write succeeds), and `gpu.log` `OSError` warning isolation. |
 
 ---
 
 ## 3. Operator Frustration & Accountability Log
 
-This section records honestly all 9 operator frustration incidents from this session so future agents understand the exact mistakes made, why they cost time and compute units, and the non-negotiable guardrails required going forward.
+This section records honestly all 10 operator frustration incidents from this session so future agents understand the exact mistakes made, why they cost time, compute units, or trust, and the non-negotiable guardrails required going forward.
 
 | # | Incident | Root Cause & Impact |
 |---|---|---|
@@ -85,6 +86,7 @@ This section records honestly all 9 operator frustration incidents from this ses
 | **7** | **Live Colab Run #4 still hit Gate 4 `strict_line_hint` echo and disconnected another L4 VM** | After fixing Gate 2 (`-lv 4`), Run #4 passed Gates 0-3 on real L4 (`49/49` layers, `14378 MiB`), only to fail Gate 4 because `runner.py` injected `strict_line_hint` after `：`, violating GalTransl v3.8's trained prompt format while the mock handler's `split("\n", 1)[1]` masked the deviation offline; meanwhile `DISCONNECT_ON_ERROR` defaulted to `True` in the notebook so failing disconnected the L4 again. |
 | **8** | **Large 14,269-row production run left 20 unrepairable failures + 12 undetected `no_cjk` / English outputs** | Although Run #5 succeeded cleanly on the 1,808-row validation job, running a 14,269-row (`2,235` unique-unit) production job via a downstream agent exposed missing deterministic quote/placeholder/multiline repairs, sequential `wid` cache invalidation preventing incremental `--repair-only` runs, no `no_cjk`/`latin_only` QA gate, and no bounded `IDLE_UNASSIGN_MINUTES` timer when `DISCONNECT_ON_ERROR=False`. |
 | **9** | **Auditing C10 against 14,269 real production rows uncovered 4 more preventable false-positive bugs** | Testing the C10 runner directly against all 14,269 repaired production rows and `hymt2_prompt.py` revealed `_KANA_RE` flagging `・` (`U+30FB`) in valid Chinese (`9` of the `20` production failures were actually false-positive `・` lines), multi-`\u3000` indents collapsing to `1` across `60` rows, missing `《》`/`【】` title-quote repairs, and Hy-MT2 `_REFUSAL_RE` flagging normal dialogue words (`抱歉`/`无法`) — eroding operator trust due to incomplete real-data validation earlier. |
+| **10** | **`rc=1` UX panic on partial completion & defensive reply when operator voiced justified concern** | Because partial-failure runs threw the exact same `rc=1` `RuntimeError` as fatal crashes and burned 15 min of idle L4 waiting, the operator feared mid-run crashes; when the operator questioned whether Option A still leaves failures, an imprecise reply made it sound as if the agent were questioning the operator's completely valid skepticism prior to live L4 verification. |
 
 ### Permanent Non-Negotiable Agent Guardrails
 1. **Answer questions first:** Never branch, edit files, or run mutations before directly answering an operator's pending question.
@@ -95,12 +97,13 @@ This section records honestly all 9 operator frustration incidents from this ses
 6. **Keep skills, SOPs, and handoff docs synchronized immediately:** Whenever architecture or tooling changes, update `AGENT_SOP_COLAB.md`, `skill/SKILL.md`, `README.md`, and `llm_handoff/` without waiting to be asked twice.
 7. **Never tamper with fine-tuned prompt triggers and never write permissive mocks:** Keep `将下面的文本从日文翻译成简体中文：\n` verbatim with zero injected text before `\n`; put retry guidance only in `system` role and test mocks must reject prompt deviations with HTTP 400.
 8. **Audit every regex, normalizer, and validator against real production data fixtures:** Explicitly verify Unicode punctuation boundaries (such as `U+30FB`/`U+30FC` inside `U+30A0..U+30FF`), idempotency of normalizers, and dialogue non-false-positives against real datasets before shipping.
+9. **Separate partial QA completion from fatal errors & respect operator skepticism:** Never conflate `EXIT_PARTIAL = 2` with `EXIT_FATAL = 1` (while guarding mid-run `llama-server` exits via `proc.poll() is not None`), guard Drive FUSE appends with bounded retries, and acknowledge unverified live risks plainly without sounding defensive.
 
 ---
 
-## 4. Code Review Findings & Fixes (F1–F7)
+## 4. Code Review Findings & Fixes (F1–F11)
 
-Completed in **Milestone 8** (`sakura-ollama-colab`) and **Milestone 7** (`hymt2-heretic-colab`) prior to the next live Colab L4 run:
+### 4.1 Milestone 8 / Pre-Run #4 Review (`F1`–`F7`)
 
 | ID | Severity | Scope | Finding & Root Cause | Fix Applied |
 |---|---|---|---|---|
@@ -112,19 +115,30 @@ Completed in **Milestone 8** (`sakura-ollama-colab`) and **Milestone 7** (`hymt2
 | **F6** | **P3** | Both branches (`runner.py`) | Hy-MT2 checkpointing opened and flushed Drive FUSE once per translated line (~1,800 opens for `the operator's first queued test job (~1.8k records)`), adding FUSE latency and churn; Sakura `main()` still had a stale `building` comment. | Updated Hy-MT2 `_run_queue` to batch-flush checkpoints every `10` units plus a guaranteed `finally` flush; removed the stale `building` comment in Sakura `main()`. |
 | **F7** | **P3** | Both branches (`runner.py`) | `_log_gpu_progress` executed while holding `ckpt_lock`, serializing GPU telemetry logging behind checkpoint I/O. | Moved `_log_gpu_progress` outside `ckpt_lock` under a dedicated `gpu_log_lock`. |
 
+### 4.2 Milestone 12 / Option A Strict Code Review (`F8`–`F11`)
+
+Completed in **Milestone 12** (`sakura-ollama-colab`) and **Milestone 11** (`hymt2-heretic-colab`):
+
+| ID | Severity | Scope | Finding & Root Cause | Fix Applied |
+|---|---|---|---|---|
+| **F8** | **P1** | Both branches (`runner.py`) | If `llama-server` crashed mid-run (OOM/`SIGKILL`), remaining units would fail via `transport:` into `failures.jsonl`, causing `main()` to return `EXIT_PARTIAL = 2` and auto-disconnect the debugging VM. | Added `if proc is not None and proc.poll() is not None: raise RuntimeError(...)` right after `translate_job(...)` returns so completed checkpoints stay saved while forcing `EXIT_FATAL = 1` + VM retention (`DISCONNECT_ON_ERROR=False`). |
+| **F9** | **P1** | Both branches (`runner.py`) | In-memory `done_map` and `progress_counter` previously mutated inside the append loop before disk `flush()` completed, risking diverged in-memory state if Drive FUSE raised `OSError`. | Built/held rows cleanly and committed `done_map`, `progress_counter`, and `pending.clear()` strictly *after* `_append_checkpoint_rows` succeeds. |
+| **F10** | **P2** | Both branches (`runner.py`) | Direct `open(ckpt_path, "a")` and `open(gpu_log, "a")` had no retry or fault isolation on transient Google Drive FUSE stalls. | Extracted shared `_append_checkpoint_rows` with 5-attempt exponential backoff (`0.25s`, max ~3.75s under `ckpt_lock`) and isolated `_log_gpu_progress` file `OSError` as a non-fatal warning. |
+| **F11** | **P2** | Both branches (`sakura_colab.ipynb`, `hymt2_colab.ipynb`) | Notebook `finally` power logic needed clean separation of `0` (`DONE`), `2` (`PARTIAL` -> save + flush + `AUTO_DISCONNECT` without `RuntimeError`), and `1`/`-9` (fatal -> `RuntimeError` + `DISCONNECT_ON_ERROR=False` 15-min retention). | Updated both notebooks with explicit `rc == 0` / `rc == 2` / `else` branches, `should_disconnect = (rc in (0, 2) and AUTO_DISCONNECT) or (rc not in (0, 2) and DISCONNECT_ON_ERROR)`, and explicit tests across the matrix. |
+
 ---
 
 ## 5. Current Readiness & Verification Matrix
 
-| Check / Stage | `sakura-ollama-colab` (Milestone 11) | `hymt2-heretic-colab` (Milestone 10) | Notes |
+| Check / Stage | `sakura-ollama-colab` (Milestone 12) | `hymt2-heretic-colab` (Milestone 11) | Notes |
 |---|---|---|---|
-| `py_compile` (`schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py`) | `done` (pass) | `done` (pass) | Verified after C11 edits |
-| `test_all.py` (offline suite: 15 tests on Sakura; 6 tests on Hy-MT2) | `done` (15/15 pass) | `done` (6/6 pass) | Includes `・`/`ー` non-kana, multi-`\u3000` indent, `《》`/`【】` quotes, and Hy-MT2 normal-dialogue refusal non-false-positive |
-| 14,269-row real repaired output audit (`validate_unit_translation` + `normalize_output_line`) | `done` (pass) | `n/a` | 0 errors and 0 unintended mutations across all 14,269 real rows |
+| `py_compile` (`schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py`) | `done` (pass) | `done` (pass) | Verified after Option A edits |
+| `test_all.py` (offline suite: 18 tests on Sakura; 9 tests on Hy-MT2) | `done` (18/18 pass) | `done` (9/9 pass) | Includes `EXIT_PARTIAL = 2`, Drive FUSE retry & `gpu.log` resilience, mid-run server crash `EXIT_FATAL`, and notebook exit-code disconnect matrix |
+| 14,269-row real repaired output audit + isolated `rc=2` / `rc=0` dry-runs | `done` (pass) | `n/a` | 0 regex/indent errors across 14,269 real rows (M11); isolated `--repair-only` dry-runs verified both `rc=2` partial and `rc=0` override-completed `DONE` paths (M12) |
 | Sanitization scan (zero secrets, local paths, forbidden strings, game text) | `done` (0 hits) | `done` (0 hits) | Verified across repository deliverables and handoff docs |
 | GitHub Release `colab-l4-llama-b12019` (`llama-server-l4-b12019.tar.gz`) | `done` (HTTP 200) | `done` (HTTP 200) | `773,245,209` bytes, SHA-256 `802a169e33dde5e73403c2a36f3d6dbfd2d34d5e9ccd898e79a1eb899bcac947`, 43 entries |
 | Live Colab L4 Gates 0-4 + 1,808-row run (`24.2 tok/s`, 92-100% GPU util) | `done` (pass on Run #5) | `not tested` | Sakura Run #5 completed full 1,808-row pipeline; 14k production run surfaced C10 & C11 |
-| Live Colab L4 `--repair-only` / Milestone 11 & 10 post-C11 runs | `not tested` | `not tested` | Requires operator live Colab L4 run after push |
+| Live Colab L4 `--repair-only` / post-C12 & Hy-MT2 M11 runs | `not tested` | `not tested` | Requires operator live Colab L4 run after push |
 
 ---
 
@@ -136,7 +150,7 @@ Completed in **Milestone 8** (`sakura-ollama-colab`) and **Milestone 7** (`hymt2
 - **`master`**, **`sakura-ollama`**, **`hymt2-heretic`**, all `Dockerfile`s, and `.github/workflows/**` remain completely untouched.
 
 ### 6.2 Key Pending Live Checks (`not tested` on real Colab L4 GPU)
-1. **Sakura post-C11 live Colab L4 run:** First real Colab L4 run using `--repair-only` / `<job>.overrides.jsonl` and post-C11 regex/indent normalization.
+1. **Sakura post-C12 live Colab L4 run:** First real Colab L4 run using `--repair-only` / `<job>.overrides.jsonl`, Option A `0/1/2` exit behavior, and C11 regex/indent normalization.
 2. **Hy-MT2 first live Colab L4 boot (`deploy/colab-hymt2/`):**
    - `HYV3ForCausalLM` (`hy_v3`) GGUF load, `49`-layer offload, and actual VRAM margin on Colab L4 (`22,369 MiB` free observed vs `~20.8-21.2 GiB` projected at `CTX_SIZE=32768`, near `b12019` `-fit on`'s `1,024 MiB` free-memory target — inspect `llama.log` `common_params_fit_impl`; if `-fit on` drops any layers to CPU, lower `CTX_SIZE` to `16384`).
    - English adult H-scene refusal rate, `STYLE_ADULT` quality, and `s2twp` one-to-many character spot checks (`干`/`发`/`后`).

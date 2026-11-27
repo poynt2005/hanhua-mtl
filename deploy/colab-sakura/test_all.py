@@ -478,6 +478,10 @@ class SakuraColabTests(unittest.TestCase):
                 self.assertIn("IDLE_UNASSIGN_MINUTES", full_src)
                 self.assertIn("REPAIR_ONLY", full_src)
                 self.assertIn("STOP THE RUNTIME NOW", full_src)
+                self.assertIn("rc == 2", full_src)
+                self.assertIn("[PARTIAL]", full_src)
+                self.assertIn("rc in (0, 2)", full_src)
+                self.assertIn("rc not in (0, 2)", full_src)
             bridge_src = (HERE / "drive_bridge.py").read_text(encoding="utf-8")
             self.assertNotIn("copy2", bridge_src)
             for c in code_cells:
@@ -644,7 +648,7 @@ class SakuraColabTests(unittest.TestCase):
                     ["--drive-root", str(drive_root), "--api-base", f"http://127.0.0.1:{port}/v1",
                      "--skip-gpu-check", "--manifest-wait", "0"]
                 )
-                self.assertEqual(rc, 1)
+                self.assertEqual(rc, runner.EXIT_PARTIAL)
                 self.assertEqual(len(attempts_log), 3)
                 self.assertIn("占位符", attempts_log[1])
                 fails = [
@@ -661,6 +665,9 @@ class SakuraColabTests(unittest.TestCase):
                 self.assertTrue(f0["suggested_fix"])
                 self.assertEqual(len(f0["unit_key"]), 40)
                 self.assertFalse(schema.done_marker_path(dirs["sakura_output"], "ph_job").is_file())
+                self.assertTrue((dirs["sakura_output"] / "ph_job.zh_CN.jsonl").is_file())
+                self.assertTrue((dirs["sakura_output"] / "ph_job.zh_TW.jsonl").is_file())
+                self.assertTrue((dirs["sakura_output"] / "ph_job.qa_report.json").is_file())
         finally:
             srv.shutdown()
             srv.server_close()
@@ -862,11 +869,112 @@ class SakuraColabTests(unittest.TestCase):
                 ["--drive-root", str(drive_root), "--api-base", "http://127.0.0.1:9/v1",
                  "--repair-only", "--job", "bad_lang", "--skip-gpu-check", "--manifest-wait", "0"]
             )
-            self.assertEqual(rc, 1)
+            self.assertEqual(rc, runner.EXIT_PARTIAL)
             self.assertFalse(schema.done_marker_path(dirs["sakura_output"], "bad_lang").is_file())
+            self.assertTrue((dirs["sakura_output"] / "bad_lang.zh_CN.jsonl").is_file())
+            self.assertTrue((dirs["sakura_output"] / "bad_lang.zh_TW.jsonl").is_file())
             qa = json.loads((dirs["sakura_output"] / "bad_lang.qa_report.json").read_text("utf-8"))
             self.assertEqual(qa["no_cjk"], 1)
             self.assertEqual(qa["latin_only"], 1)
+
+    def test_checkpoint_io_retry_and_gpu_log_resilience(self):
+        import builtins
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            ckpt = root / "retry.checkpoint.jsonl"
+            gpu_log = root / "retry.gpu.log"
+            real_open = builtins.open
+            calls = [0]
+
+            def flaky_open(file, *args, **kwargs):
+                if Path(file) == ckpt and calls[0] < 2:
+                    calls[0] += 1
+                    raise OSError("transient Drive FUSE stall")
+                return real_open(file, *args, **kwargs)
+
+            with mock.patch("builtins.open", side_effect=flaky_open), mock.patch.object(runner.time, "sleep"):
+                runner._append_checkpoint_rows(
+                    ckpt,
+                    [{"unit_key": "k1", "wid": "w000001", "zh_cn": "测试成功"}],
+                    retries=5,
+                    base_delay=0.01,
+                )
+            self.assertEqual(calls[0], 2)
+            lines = [json.loads(ln) for ln in ckpt.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(lines[0]["zh_cn"], "测试成功")
+
+            def always_fail_open(file, *args, **kwargs):
+                if Path(file) in (ckpt, gpu_log):
+                    raise OSError("persistent FUSE error")
+                return real_open(file, *args, **kwargs)
+
+            with mock.patch("builtins.open", side_effect=always_fail_open), mock.patch.object(runner.time, "sleep"):
+                with self.assertRaises(OSError):
+                    runner._append_checkpoint_rows(
+                        ckpt,
+                        [{"unit_key": "k2", "wid": "w000002", "zh_cn": "不会写入"}],
+                        retries=3,
+                        base_delay=0.01,
+                    )
+                # GPU progress telemetry OSError must log warning and NOT crash
+                runner._log_gpu_progress(1, 10, gpu_log, skip_gpu_check=True)
+
+    def test_midrun_server_crash_returns_fatal_not_partial(self):
+        class _DeadProc:
+            def __init__(self):
+                self.returncode = -9
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                return None
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def kill(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            drive_root = root / "drive" / schema.DRIVE_ROOT_NAME
+            dirs = schema.ensure_drive_tree(drive_root)
+            rows = [{"id": "c1", "file": "f1", "kind": "dialogue", "text": "「テスト」"}]
+            inp = dirs["sakura_input"] / "crash_job.jsonl"
+            inp.write_text(json.dumps(rows[0], ensure_ascii=False) + "\n", encoding="utf-8")
+            schema.atomic_write_json(
+                schema.manifest_path_for(inp),
+                schema.build_manifest("crash_job", inp, 1),
+            )
+            with mock.patch.object(runner, "query_gpu_stats", return_value={"name": "NVIDIA L4", "memory_total_mib": 23034.0}), \
+                 mock.patch.object(runner, "ensure_llama_server", return_value=Path("/content/bin/llama-server")), \
+                 mock.patch.object(runner, "stage_model", return_value=Path("/content/models/Sakura.gguf")), \
+                 mock.patch.object(runner, "start_and_verify_server", return_value=(_DeadProc(), "http://127.0.0.1:9/v1")), \
+                 mock.patch.object(runner, "translate_job", return_value={"job": "crash_job", "failures": 1, "missing": 1, "no_cjk": 0, "latin_only": 0}):
+                with self.assertRaises(RuntimeError) as ctx:
+                    runner.main(["--drive-root", str(drive_root), "--manifest-wait", "0"])
+                self.assertIn("llama-server exited unexpectedly", str(ctx.exception))
+
+            with self.assertRaises(FileNotFoundError):
+                runner.main(["--drive-root", str(drive_root), "--job", "nonexistent_job", "--skip-gpu-check"])
+
+    def test_notebook_exit_code_disconnect_matrix(self):
+        def _sim_should_disconnect(rc: int, auto_disconnect: bool, disconnect_on_error: bool) -> bool:
+            return (rc in (0, 2) and auto_disconnect) or (rc not in (0, 2) and disconnect_on_error)
+
+        # AUTO_DISCONNECT=True, DISCONNECT_ON_ERROR=False (default):
+        # rc=0 and rc=2 auto-disconnect to save L4 credits; rc=1 and rc=-9 retain VM
+        self.assertTrue(_sim_should_disconnect(0, True, False))
+        self.assertTrue(_sim_should_disconnect(2, True, False))
+        self.assertFalse(_sim_should_disconnect(1, True, False))
+        self.assertFalse(_sim_should_disconnect(-9, True, False))
+        # AUTO_DISCONNECT=False, DISCONNECT_ON_ERROR=False -> never auto-disconnect
+        self.assertFalse(_sim_should_disconnect(2, False, False))
+        # DISCONNECT_ON_ERROR=True -> errors also disconnect
+        self.assertTrue(_sim_should_disconnect(1, True, True))
 
     def test_no_duplicate_or_lost_ids(self):
         with tempfile.TemporaryDirectory() as td:

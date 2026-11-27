@@ -55,6 +55,12 @@ MIN_TOTAL_VRAM_MIB = 22000.0
 MIN_USED_VRAM_MIB = 12000.0
 DEFAULT_MIN_TPS = 8.0
 
+EXIT_OK = 0
+EXIT_FATAL = 1
+EXIT_PARTIAL = 2
+CHECKPOINT_WRITE_RETRIES = 5
+CHECKPOINT_RETRY_BASE_DELAY = 0.25
+
 SYSTEM_PROMPT = (
     "你是一个视觉小说翻译模型，可以通顺地使用给定的术语表以指定的风格将日文翻译成简体中文，"
     "并联系上下文正确使用人称代词，注意不要混淆使役态和被动态的主语和宾语，"
@@ -1360,6 +1366,35 @@ def load_overrides_file(path: Path) -> tuple[dict[str, str], dict[str, str]]:
     return by_id, by_key
 
 
+def _append_checkpoint_rows(
+    ckpt_path: Path,
+    rows: list[dict[str, Any]],
+    retries: int = CHECKPOINT_WRITE_RETRIES,
+    base_delay: float = CHECKPOINT_RETRY_BASE_DELAY,
+) -> None:
+    if not rows:
+        return
+    payload = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+    last_exc: OSError | None = None
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            with open(ckpt_path, "a", encoding="utf-8", newline="\n") as fh:
+                fh.write(payload)
+                fh.flush()
+            return
+        except OSError as exc:
+            last_exc = exc
+            if attempt < retries:
+                delay = base_delay * (2 ** (attempt - 1))
+                print(
+                    f"[ckpt] warn: write failed on {ckpt_path.name} "
+                    f"(attempt {attempt}/{retries}): {exc}; retrying in {delay:.2f}s"
+                )
+                time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
+
+
 def _log_gpu_progress(done_count: int, total_count: int, gpu_log: Path, skip_gpu_check: bool) -> None:
     if skip_gpu_check:
         msg = f"[progress] {done_count}/{total_count} unique units"
@@ -1374,8 +1409,11 @@ def _log_gpu_progress(done_count: int, total_count: int, gpu_log: Path, skip_gpu
         except Exception as exc:
             msg = f"[progress] {done_count}/{total_count} | GPU query warn: {exc}"
     print(msg)
-    with open(gpu_log, "a", encoding="utf-8", newline="\n") as fh:
-        fh.write(f"{schema.utc_now_iso()} {msg}\n")
+    try:
+        with open(gpu_log, "a", encoding="utf-8", newline="\n") as fh:
+            fh.write(f"{schema.utc_now_iso()} {msg}\n")
+    except OSError as exc:
+        print(f"[progress] warn: could not append {gpu_log.name}: {exc}")
 
 
 def translate_job(
@@ -1504,23 +1542,24 @@ def translate_job(
             if ok_map:
                 should_log_gpu = False
                 cur_done = 0
+                new_rows: list[dict[str, Any]] = []
+                for uk, (cn, raw_saved, flags) in ok_map.items():
+                    row: dict[str, Any] = {
+                        "unit_key": uk,
+                        "wid": seen_keys[uk]["wid"],
+                        "zh_cn": cn,
+                    }
+                    if raw_saved is not None:
+                        row["raw"] = raw_saved
+                    if flags:
+                        row["flags"] = flags
+                    new_rows.append(row)
                 with ckpt_lock:
-                    with open(ckpt_path, "a", encoding="utf-8", newline="\n") as fh:
-                        for uk, (cn, raw_saved, flags) in ok_map.items():
-                            row: dict[str, Any] = {
-                                "unit_key": uk,
-                                "wid": seen_keys[uk]["wid"],
-                                "zh_cn": cn,
-                            }
-                            if raw_saved is not None:
-                                row["raw"] = raw_saved
-                            if flags:
-                                row["flags"] = flags
-                            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-                            done_map[uk] = row
-                        fh.flush()
+                    _append_checkpoint_rows(ckpt_path, new_rows)
+                    for row in new_rows:
+                        done_map[row["unit_key"]] = row
                     prev = progress_counter["count"]
-                    progress_counter["count"] += len(ok_map)
+                    progress_counter["count"] += len(new_rows)
                     cur_done = progress_counter["count"]
                     should_log_gpu = (cur_done // 50) > (prev // 50)
                 if should_log_gpu:
@@ -1689,7 +1728,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not job_files:
         print(f"[runner] No .jsonl jobs found in {input_dir}")
-        return 0
+        return EXIT_OK
 
     overrides_path = Path(args.overrides) if args.overrides else None
 
@@ -1728,7 +1767,7 @@ def main(argv: list[str] | None = None) -> int:
                 llama_exe, local_bin, model_path, llama_log, min_tps=args.min_tps
             )
 
-        had_failures = False
+        partial_jobs: list[dict[str, Any]] = []
         for jf in job_files:
             summary = translate_job(
                 job=jf.stem,
@@ -1744,14 +1783,31 @@ def main(argv: list[str] | None = None) -> int:
                 overrides_path=overrides_path,
                 repair_only=args.repair_only,
             )
+            if proc is not None and proc.poll() is not None:
+                raise RuntimeError(
+                    f"llama-server exited unexpectedly during job {jf.stem!r} (rc={proc.returncode}); "
+                    "completed progress was saved to checkpoint.jsonl"
+                )
             if (
                 summary.get("failures", 0)
                 or summary.get("missing", 0)
                 or summary.get("no_cjk", 0)
                 or summary.get("latin_only", 0)
             ):
-                had_failures = True
-        return 1 if had_failures else 0
+                partial_jobs.append(summary)
+        if partial_jobs:
+            print(
+                "[runner] PARTIAL_COMPLETE: all jobs finished running, outputs/checkpoint/failures saved, "
+                ".DONE.json NOT written for incomplete jobs:"
+            )
+            for pj in partial_jobs:
+                print(
+                    f"  - {pj['job']}: missing={pj.get('missing', 0)} failures={pj.get('failures', 0)} "
+                    f"no_cjk={pj.get('no_cjk', 0)} latin_only={pj.get('latin_only', 0)} "
+                    f"-> {work_dir / (pj['job'] + '.failures.jsonl')}"
+                )
+            return EXIT_PARTIAL
+        return EXIT_OK
     finally:
         if proc is not None and proc.poll() is None:
             proc.terminate()

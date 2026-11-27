@@ -1,11 +1,11 @@
 # 20 — Sakura Colab Workflow (`sakura-ollama-colab`)
 
 > **Branch:** `sakura-ollama-colab` (branched from `origin/sakura-ollama` at `a94c8fb`)
-> **Updated:** 2026-11-28 01:05 +08:00
+> **Updated:** 2026-11-28 01:30 +08:00
 > **Agent:** Antigravity
 > **Model:** Gemini 4 Neon
-> **Status:** READY — Milestone 11 complete (all C10 production hardening & C11 real-data regex/indent fixes implemented, verified across 15/15 offline suites + 14,269 real production rows with 0 errors / 0 unintended mutations, 0 sanitization hits)
-> **Session Postmortem & Full Context:** See [21_colab_session_postmortem.md](21_colab_session_postmortem.md) for the complete C1–C11 failure table, 9-item operator accountability log, F1–F7 review fixes, 8 permanent guardrails, and live Colab L4 specs.
+> **Status:** READY — Milestone 12 complete (Option A exit-code separation `0/1/2`, mid-run `llama-server` crash guard, 5x Drive FUSE checkpoint write retry, `gpu.log` resilience, C10/C11 hardening; verified across 18/18 offline tests + isolated 14,269-row `rc=2` & `rc=0` dry-runs + 0 sanitization hits)
+> **Session Postmortem & Full Context:** See [21_colab_session_postmortem.md](21_colab_session_postmortem.md) for the complete C1–C12 failure table, 10-item operator accountability log, F1–F11 review fixes, 9 permanent guardrails, and live Colab L4 specs.
 
 ---
 
@@ -75,11 +75,15 @@ Replace the `vast.ai` rental workflow for the Japanese -> Traditional Chinese Ga
 7. **Language QA & `.DONE.json` Gate (`check_language_qa`, `is_allowlisted_no_cjk`):**
    - When source has Japanese (`_JA_PRESENT_RE`), output must contain at least one CJK character (`_CJK_RE`), unless `is_allowlisted_no_cjk` accepts it (non-empty stripped core that is pure numbers/symbols OR ASCII word tokens appearing verbatim case-insensitively in `src_text`, allowing verbatim ASCII command-example lines while rejecting English translations and truncated punctuation-only outputs).
    - `qa_report.json` tracks `manual_overrides`, `repaired`, `missing`, `failures`, `no_cjk`, `latin_only`, `tw_mode`, `roundtrip_mismatches`, and `watch_chars`.
-   - `.DONE.json` is written (and exit code `0` returned) **only** when `missing == 0 and failures == 0 and no_cjk == 0 and latin_only == 0`.
-8. **Actionable Failures, Overrides & Notebook Lifecycle:**
+   - `.DONE.json` is written (and exit code `EXIT_OK = 0` returned) **only** when `missing == 0 and failures == 0 and no_cjk == 0 and latin_only == 0`.
+8. **Three-Tier Exit Codes (Option A), FUSE Resilience, Actionable Failures & Notebook Lifecycle:**
+   - **`EXIT_OK = 0`**: All jobs passed 100%, `.DONE.json` written -> `[DONE]` -> `AUTO_DISCONNECT` unassigns L4.
+   - **`EXIT_PARTIAL = 2`**: All jobs completed and saved `zh_CN.jsonl`, `zh_TW.jsonl`, `qa_report.json`, `checkpoint.jsonl`, and `<job>.failures.jsonl` while `llama-server` stayed healthy (`proc.poll() is None`), with remaining `failures`/`missing`/`no_cjk`/`latin_only` -> `.DONE.json` NOT written -> notebook prints calm `[PARTIAL]` summary (no `RuntimeError`), flushes Drive, and honors `AUTO_DISCONNECT=True` immediately (zero idle GPU burn).
+   - **`EXIT_FATAL = 1`**: Raised/returned ONLY on startup Gates 0-4, invalid inputs/manifest, persistent Drive FUSE write errors, or unexpected mid-run `llama-server` exit (`proc.poll() is not None`, checked immediately after `translate_job`). `DISCONNECT_ON_ERROR=False` retains L4 up to `IDLE_UNASSIGN_MINUTES=15` with `STOP THE RUNTIME NOW` banner.
+   - **Drive FUSE resilience:** `_append_checkpoint_rows` retries transient `OSError` up to `5` times (`0.25s` exponential backoff) before updating in-memory `done_map` / `progress_counter`; `_log_gpu_progress` isolates `gpu.log` `OSError` as a non-fatal warning.
    - `<job>.failures.jsonl` emits `{unit_key, wid, text, errors, attempts, expected_placeholders, observed_placeholders, suggested_fix, needs_override, source_kind}`.
    - `<job>.overrides.jsonl` (auto-discovered in `sakura/input/` or via `--overrides`) accepts `translation` / `zh_cn` / `override` keyed by `id`, `unit_key`, or `kind` + `speaker` + `text`, passing directly through `to_simplified` without GPU usage.
-   - `sakura_colab.ipynb` defaults: `AUTO_DISCONNECT=True`, `DISCONNECT_ON_ERROR=False`, `IDLE_UNASSIGN_MINUTES=15`, `REPAIR_ONLY=False`, `TARGET_JOB=""`. On error with `DISCONNECT_ON_ERROR=False`, Drive flushes first, prints `STOP THE RUNTIME NOW` + idle cost note (~2 compute units/hr), and waits `IDLE_UNASSIGN_MINUTES` (interruptible via KeyboardInterrupt) before calling `runtime.unassign()`.
+   - `sakura_colab.ipynb` defaults: `AUTO_DISCONNECT=True`, `DISCONNECT_ON_ERROR=False`, `IDLE_UNASSIGN_MINUTES=15`, `REPAIR_ONLY=False`, `TARGET_JOB=""`.
 
 ---
 
@@ -98,6 +102,7 @@ Replace the `vast.ai` rental workflow for the Japanese -> Traditional Chinese Ga
 | 2026-11-26 14:30 | Milestone 9: Fix Live Run #4 `strict_line_hint` Prompt Echo & Split-Quote/Default Fixes | Done | Run #4 passed Gates 0-3 (`49/49` layers, `14378 MiB`, `20.84 tok/s`) then failed Gate 4 sample 1 due to `strict_line_hint` injected after `：`. Removed `strict_line_hint` completely, set `(0.3, 0.1, 0.0)` gate fallback, removed redundant `LLAMA_ARG_LOG_VERBOSITY`, added asymmetric split-quote & heart-glyph normalization, defaulted `DISCONNECT_ON_ERROR=False`, hardened `test_all.py` mock handler to HTTP 400 on prompt drift |
 | 2026-11-28 00:50 | Milestone 10: Stable `unit_key`, Quote/Placeholder/Multiline Repair, Language QA & `--repair-only` (C10) | Done | Live Run #5 completed the 1,808-row validation job (`24.2 tok/s`, 92-100% L4 util); a subsequent 14,269-row (`2,235` unique-unit) production job finished `2,215` units (`24.1 tok/s`) with `20` residual failures (`46` missing rows) + `12` undetected `no_cjk` / English outputs (`5` verbatim command-example lines + `7` untranslated/truncated lines). Implemented SHA-1 `unit_key` + legacy `wid` migration, generalized `repair_quotes`, internal `⟦0⟧` placeholder encode/decode, `overrides.jsonl` + kana glossary substitution, `\n` multiline segment split/rejoin, `no_cjk`/`latin_only` QA + allowlist, `--repair-only`/`--job`/`--overrides`, actionable `failures.jsonl`, and `IDLE_UNASSIGN_MINUTES=15` + `STOP THE RUNTIME NOW` safeguard. Added 9 test suites (`15/15` passing), verified isolated 14,269-row repair dry-run (`cached=2215 | todo=20`), 0 sanitization hits |
 | 2026-11-28 01:00 | Milestone 11: Real-Data Regex & Validator False-Positive Fixes (C11) | Done | Auditing all validators/regexes against all 14,269 real translated rows revealed: (1) `_KANA_RE` (`\u30a0-\u30ff`) falsely flagged katakana middle dot `・` (`U+30FB`) and prolonged mark `ー` (`U+30FC`) as `residual_kana` in 9 valid rows; (2) `normalize_output_line` collapsed multiple leading `\u3000` indents to 1 across 60 multi-indent rows; (3) `repair_quotes` missed `《》` / `【】` title-quote repairs. Narrowed `_KANA_RE` / `_JA_PRESENT_RE` to real kana letters, preserved exact leading `\u3000` count (verified idempotent), added `《》` / `【】` quote repair, and confirmed 0 errors & 0 non-indent unintended mutations across all 14,269 real rows |
+| 2026-11-28 01:30 | Milestone 12: Option A Exit-Code Separation (`0/1/2`) & FUSE I/O Resilience (C12) | Done | Separated `EXIT_OK = 0`, `EXIT_FATAL = 1`, `EXIT_PARTIAL = 2` so completed runs with minor residual failures save all outputs, skip `.DONE.json`, print calm `[PARTIAL]` summary in `sakura_colab.ipynb` (no red `RuntimeError`), and still honor `AUTO_DISCONNECT=True`; added `proc.poll() is not None` mid-run server crash guard, 5-attempt exponential-backoff `_append_checkpoint_rows` (committing `done_map` post-write), and `gpu.log` `OSError` warning isolation. Verified 18/18 tests + isolated 14,269-row `rc=2` & `rc=0` dry-runs + 0 sanitization hits |
 
 ---
 
@@ -105,13 +110,13 @@ Replace the `vast.ai` rental workflow for the Japanese -> Traditional Chinese Ga
 
 | Check | State | Notes |
 |---|---|---|
-| `py_compile` on `schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py` | `done` (pass) | Executed after Milestone 11 edit |
-| Offline `test_all.py` (15 suites covering schema, normalization, 8 quote-repair fixtures, `・`/`ー` non-kana & multi-`\u3000` indent regression, kana/glossary/overrides, placeholder normalization + failure record, multiline segment split/rejoin, `no_cjk`/`latin_only` + allowlist, stable `unit_key` + legacy migration, `--repair-only` `cached=2215 \| todo=20`, DONE gate block, ID parity, prebuilt bundle, `.ipynb` AST + `IDLE_UNASSIGN_MINUTES` + strict HTTP 400 prompt check) | `done` (15/15 pass) | Executed after Milestone 11 edit using local mock SSE & HTTP servers and temp dirs |
-| 14,269-row real repaired output audit (`validate_unit_translation` + `normalize_output_line` idempotency) | `done` (pass) | `errs=0`, `non_indent_muts=0`, `idempotent_muts=0` across all 14,269 real production rows |
-| Isolated 14,269-row repair dry-run (`--repair-only` on read-only temp copy of legacy 2,215-unit checkpoint) | `done` (pass) | Executed at Milestone 10: verified `cached=2215 | todo=20`, all 2,215 cached translations untouched verbatim, 7 `no_cjk` / 6 `latin_only` caught cleanly while 5 verbatim command lines passed allowlist, 14,269/14,269 ID parity |
+| `py_compile` on `schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py` | `done` (pass) | Executed after Milestone 12 edit |
+| Offline `test_all.py` (18 suites covering schema, normalization, 8 quote-repair fixtures, `・`/`ー` non-kana & multi-`\u3000` indent regression, kana/glossary/overrides, placeholder normalization + failure record, multiline segment split/rejoin, `no_cjk`/`latin_only` + allowlist, stable `unit_key` + legacy migration, `--repair-only` `cached=2215 \| todo=20`, `EXIT_PARTIAL=2` + DONE gate block, Drive FUSE checkpoint retry + `gpu.log` `OSError` resilience, mid-run server crash `EXIT_FATAL`, ID parity, prebuilt bundle, `.ipynb` AST + `[PARTIAL]` + disconnect matrix + strict HTTP 400 prompt check) | `done` (18/18 pass) | Executed after Milestone 12 edit using local mock SSE & HTTP servers and temp dirs |
+| 14,269-row real repaired output audit (`validate_unit_translation` + `normalize_output_line` idempotency) | `done` (pass) | `errs=0`, `non_indent_muts=0`, `idempotent_muts=0` across all 14,269 real production rows (Milestone 11) |
+| Isolated 14,269-row repair dry-run (`--repair-only` on read-only temp copy of legacy 2,215-unit checkpoint) | `done` (pass) | Executed after Milestone 12 edit: verified Case 1 (`rc=2` partial, no `.DONE.json`, 14,269 rows written) and Case 2 with overrides (`rc=0`, `.DONE.json` written, stale `failures.jsonl` removed) |
 | Sanitization scan & Drive sync verification (`drive_bridge.py doctor`, standalone export, SHA-256 parity) | `done` (0 hits) | Verified zero secrets, local paths, game names/prose, or Docker CI triggers |
 | Live Colab L4 Gates 0-4 & 1,808-row run (Run #5) | `done` (pass) | `NVIDIA L4 23034 MiB`, `49/49` layers, `14378 MiB`, `24.2 tok/s`, 92-100% GPU util |
-| Live Colab L4 `--repair-only` / post-C11 full production run | `not tested` | Requires operator live Colab L4 run after Milestone 11 push |
+| Live Colab L4 `--repair-only` / post-C12 full production run | `not tested` | Requires operator live Colab L4 run after Milestone 12 push |
 
 ---
 
