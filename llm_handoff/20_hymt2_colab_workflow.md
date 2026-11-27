@@ -87,8 +87,11 @@ Provide a zero-compile **Google Colab L4 (24 GB) + Google Drive (5 TB) one-click
 
 ---
 
-## 5. First Live L4 Boot Checklist
+## 5. First Live L4 Boot Checklist & Post-Pull Cleanup
 1. Ensure 18.24 GB `Hy-MT2-30B-A3B-uncensored-heretic.i1-Q4_K_M.gguf` and `llama-server-l4-b12019.tar.gz` are deployed via `deploy_models_colab.ipynb` on Free CPU Colab.
-2. Push a small ~50-line English adult-scene spot-check job with `drive_bridge.py push`.
-3. Open `hymt2_colab.ipynb` on **Colab L4 GPU** (verify `DISCONNECT_ON_ERROR=False`, `IDLE_UNASSIGN_MINUTES=15`) and run `Ctrl+F9`.
-4. After completion (or Gate 2 error), inspect `hymt2/work/llama.log` (`common_params_fit_impl` + `offloaded` + tok/s), `hymt2/output/<job>.qa_report.json`, and manually spot-check explicit tone and `s2twp` `干`/`發`/`後` conversions before running full game scripts.
+2. Push a small ~50-line English adult-scene spot-check job with `drive_bridge.py push` (or `python <instructions_dir>/drive_bridge.py push` when working outside the repo).
+3. Open latest `hymt2_colab.ipynb` on **Colab L4 GPU** (verify `DISCONNECT_ON_ERROR=False`, `IDLE_UNASSIGN_MINUTES=15`, `AUTO_DISCONNECT=True`) and run `Ctrl+F9`.
+4. After completion (`[DONE]` `rc=0` or `[PARTIAL]` `rc=2`), inspect `hymt2/work/llama.log` (`common_params_fit_impl` + `offloaded` + tok/s), `hymt2/output/<job>.qa_report.json` (and `hymt2/work/<job>.failures.jsonl` if partial), pull verified outputs with `drive_bridge.py pull`, and manually spot-check explicit tone and `s2twp` `干`/`發`/`後` conversions before running full game scripts.
+5. **Post-pull Drive cleanup:** ONLY after `pull` passes SHA-256 + ID parity and local outputs are verified saved on disk, delete the completed job's residual files from `hymt2/input/`, `hymt2/work/`, and `hymt2/output/` so the next Colab job never scans stale files. **Never** delete `models/`, `bin/`, or `scripts/`.
+
+> **Standalone instructions export:** Every export to `<instructions_dir>/hymt2-heretic-colab/` must bundle all **11 files** (the 9 files under `deploy/colab-hymt2/` plus `20_hymt2_colab_workflow.md` and `21_colab_session_postmortem.md`).

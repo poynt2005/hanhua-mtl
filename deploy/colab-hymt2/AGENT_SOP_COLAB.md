@@ -52,6 +52,7 @@
 ## 三、本機 Agent 標準作業流程（Phase 0 → Phase 4）
 
 ### Phase 0：雲盤環境體檢
+*(若 Agent 目前位於獨立遊戲工作區而非本 Repo 根目錄，請改為直接呼叫 `python <instructions_dir>/drive_bridge.py ...`，例如 `~/Documents/Instructions/hanhua/game/hymt2-heretic-colab/drive_bridge.py`。)*
 ```powershell
 python deploy/colab-hymt2/drive_bridge.py doctor
 ```
@@ -73,7 +74,7 @@ python deploy/colab-hymt2/drive_bridge.py doctor
 python deploy/colab-hymt2/drive_bridge.py validate --input work/job.jsonl --glossary work/glossary.json
 python deploy/colab-hymt2/drive_bridge.py push --input work/job.jsonl --glossary work/glossary.json --name en_game_01
 ```
-推完後 **STOP**，請使用者打開 Google Colab（確認 **L4 GPU**）執行 `hymt2_colab.ipynb`（`Ctrl+F9`），完成或自動斷線後再回報。
+推完後 **STOP**，請使用者打開 Google Colab（確認 **L4 GPU**）使用**最新版本的 `hymt2_colab.ipynb`**（雲端 `scripts/` 會自動同步 `runner.py`，但若曾更新結束碼 / 待機保護流程請務必重開最新 Notebook）執行 `Ctrl+F9`，完成或自動斷線後再回報。
 
 ### Phase 3：Colab L4 端自動執行內容
 1. 檢查 `.manifest.json` SHA-256（最多輪詢等待 60 秒讓 DriveAPP 同步完）。
@@ -81,12 +82,18 @@ python deploy/colab-hymt2/drive_bridge.py push --input work/job.jsonl --glossary
 3. 4 路並行翻譯＋斷點續傳（每 10 句批次寫入 Drive checkpoint 並於結束/例外 `finally` 強制 flush）；機械檢查失敗會先以官方 plain 模板重試一次，仍失敗記進 `failures.jsonl`。其中寬鬆拒答關鍵字（`抱歉`/`无法`/`I'm sorry`/`I can't`）僅套用於開機 Gate 4；正式逐句翻譯使用嚴格 AI 拒答樣板檢查，避免誤殺正常英文台詞。
 4. 當 `missing=0`、`failures=0` 全數通過時才寫入 `output/<job>.DONE.json` 並回傳結束碼 **`0`（`EXIT_OK`）**；若全數單元已跑完、譯文／`checkpoint.jsonl`／`failures.jsonl` 均已寫入但仍有少數拒答／失敗句（且 `llama-server` 未崩潰）則**不寫 `.DONE.json`** 並回傳結束碼 **`2`（`EXIT_PARTIAL`）**，Notebook 僅印出平靜的 `[PARTIAL]` 摘要、不拋 `RuntimeError`、同步 Drive 後照 `AUTO_DISCONNECT=True` 自動釋放 L4 省點數。唯有啟動 Gate 0–4、輸入檔異常、`checkpoint.jsonl` 連續 I/O 失敗或推論中 `llama-server` 意外終止才會回傳/拋錯 **`1`（`EXIT_FATAL`）**，`finally` 先 sync 日誌並 `drive.flush_and_unmount()`，且預設 `DISCONNECT_ON_ERROR=False` 會印出 `STOP THE RUNTIME NOW` 並於 `IDLE_UNASSIGN_MINUTES=15` 後自動釋放 GPU 防呆（寫入 `checkpoint.jsonl` 具 5 次指數退避重試，`gpu.log` 寫入失敗僅警告不中斷）。
 
-### Phase 4：狀態檢查 → 拉回驗證 → 續接寫回
+### Phase 4：狀態檢查 →（若 Partial 補救）→ 拉回驗證 → 續接寫回
 ```powershell
 python deploy/colab-hymt2/drive_bridge.py status --name en_game_01
 python deploy/colab-hymt2/drive_bridge.py pull --name en_game_01 --dest work/translated
 ```
-拉回後先人工/腳本抽檢 `hymt2/work/llama.log` 的顯存餘裕與 `qa_report.json` 的 `watch_chars`（特別檢查 `干/發/後/面` 在 `s2twp` 下有無誤轉）及前 50 句 H-scene 語氣，確認無拒答/委婉再寫回遊戲。
+- 若 Colab 顯示 `[PARTIAL]`（`rc = 2`）或 `status` 顯示 `failures > 0`：代表全部句數已跑完並釋放 L4，請檢視 `hymt2/work/<job>.failures.jsonl` 與 `hymt2/output/<job>.qa_report.json`，將該句補充 `override` 或調整 `glossary.json` 後重推（已完成單元會在 `checkpoint.jsonl` 直接復用，不會重翻）。
+- 拉回後先人工/腳本抽檢 `hymt2/work/llama.log` 的顯存餘裕與 `qa_report.json` 的 `watch_chars`（特別檢查 `干/發/後/面` 在 `s2twp` 下有無誤轉）及前 50 句 H-scene 語氣，確認無拒答/委婉再寫回遊戲。
+
+### Phase 4.5：拉回驗證通過後的雲盤殘留清理（必做）
+1. **僅在確認** `drive_bridge.py pull` 成功、所有 `.zh_TW.jsonl` / `.zh_CN.jsonl` / `.qa_report.json` / `.DONE.json` 已完整保存於本機工作區（且寫回或備份完成）**之後**，才能清理雲盤。
+2. 清理目標**僅限本次已完成任務**位於雲端硬碟目錄下的殘留檔：`hymt2/input/`、`hymt2/work/`、`hymt2/output/`（以及若不再沿用之任務專屬 `hymt2/glossary.json`），避免下一款遊戲啟動 Colab 時掃描到舊任務殘留、造成錯誤或重複執行。
+3. **絕對不可刪除**共用的 `models/`、`bin/` 與 `scripts/`。
 
 ---
 

@@ -147,6 +147,7 @@ Completed in **Milestone 12** (`sakura-ollama-colab`) and **Milestone 11** (`hym
 ### 6.1 Branch Isolation & Deliverables
 - **`sakura-ollama-colab`** (`deploy/colab-sakura/`): `schema.py`, `runner.py`, `drive_bridge.py`, `deploy_models_colab.ipynb`, `sakura_colab.ipynb`, `AGENT_SOP_COLAB.md`, `skill/SKILL.md`, `README.md`, `test_all.py`.
 - **`hymt2-heretic-colab`** (`deploy/colab-hymt2/`): `schema.py`, `runner.py`, `drive_bridge.py`, `deploy_models_colab.ipynb`, `hymt2_colab.ipynb`, `AGENT_SOP_COLAB.md`, `skill/SKILL.md`, `README.md`, `test_all.py`.
+- **Standalone local agent instructions exports** (`~/Documents/Instructions/hanhua/game/<branch>/`): always export all **11 files** per branch (the 9 files in `deploy/colab-<target>/` plus `llm_handoff/20_<target>_colab_workflow.md` and `llm_handoff/21_colab_session_postmortem.md`), removing stale `__pycache__/` artifacts so downstream agents never read outdated workflow snapshots.
 - **`master`**, **`sakura-ollama`**, **`hymt2-heretic`**, all `Dockerfile`s, and `.github/workflows/**` remain completely untouched.
 
 ### 6.2 Key Pending Live Checks (`not tested` on real Colab L4 GPU)
