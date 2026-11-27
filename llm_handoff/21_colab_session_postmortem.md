@@ -133,7 +133,7 @@ Completed in **Milestone 12** (`sakura-ollama-colab`) and **Milestone 11** (`hym
 | Check / Stage | `sakura-ollama-colab` (Milestone 12) | `hymt2-heretic-colab` (Milestone 11) | Notes |
 |---|---|---|---|
 | `py_compile` (`schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py`) | `done` (pass) | `done` (pass) | Verified after Option A edits |
-| `test_all.py` (offline suite: 18 tests on Sakura; 9 tests on Hy-MT2) | `done` (18/18 pass) | `done` (9/9 pass) | Includes `EXIT_PARTIAL = 2`, Drive FUSE retry & `gpu.log` resilience, mid-run server crash `EXIT_FATAL`, and notebook exit-code disconnect matrix |
+| `test_all.py` (offline suite: 18 tests on Sakura; 10 tests on Hy-MT2) | `done` (18/18 pass) | `done` (10/10 pass) | Includes `EXIT_PARTIAL = 2`, Drive FUSE retry & `gpu.log` resilience, mid-run server crash `EXIT_FATAL`, and notebook exit-code disconnect matrix |
 | 14,269-row real repaired output audit + isolated `rc=2` / `rc=0` dry-runs | `done` (pass) | `n/a` | 0 regex/indent errors across 14,269 real rows (M11); isolated `--repair-only` dry-runs verified both `rc=2` partial and `rc=0` override-completed `DONE` paths (M12) |
 | Sanitization scan (zero secrets, local paths, forbidden strings, game text) | `done` (0 hits) | `done` (0 hits) | Verified across repository deliverables and handoff docs |
 | GitHub Release `colab-l4-llama-b12019` (`llama-server-l4-b12019.tar.gz`) | `done` (HTTP 200) | `done` (HTTP 200) | `773,245,209` bytes, SHA-256 `802a169e33dde5e73403c2a36f3d6dbfd2d34d5e9ccd898e79a1eb899bcac947`, 43 entries |
