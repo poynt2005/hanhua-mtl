@@ -1,10 +1,10 @@
 # 21 — Colab Migration Session Postmortem & Complete Context Handoff
 
-> **Date:** 2026-11-26 (+08:00)
+> **Date:** 2026-11-28 (+08:00)
 > **Agent:** Antigravity
 > **Model:** Gemini 4 Neon
 > **Branches covered:** `sakura-ollama-colab` (from `origin/sakura-ollama` `a94c8fb`) and `hymt2-heretic-colab` (from `origin/hymt2-heretic` `b10f481`)
-> **Scope:** Complete session history from initial Colab migration through Milestone 9 (`sakura-ollama-colab`) and Milestone 8 (`hymt2-heretic-colab`)
+> **Scope:** Complete session history from initial Colab migration through Milestone 10 (`sakura-ollama-colab`) and Milestone 9 (`hymt2-heretic-colab`)
 
 ---
 
@@ -48,11 +48,11 @@ All domain rules established in prior `vast.ai` handoffs were preserved verbatim
 | **Hy-MT2 GGUF** | `mradermacher/Hy-MT2-30B-A3B-uncensored-heretic-i1-GGUF` (`Hy-MT2-30B-A3B-uncensored-heretic.i1-Q4_K_M.gguf`), rev `862b7d66847b339c0594b8de39d38b035ee75f25`, `18,236,703,488` bytes, SHA-256 `b0358d0319aae3f821fef4989bd85f409336139bfc7db59fd049848b9882321c` |
 | **Prebuilt L4 `llama-server` bundle** | GitHub Release `poynt2005/hanhua-mtl` tag `colab-l4-llama-b12019`, asset `llama-server-l4-b12019.tar.gz`, `773,245,209` bytes, SHA-256 `802a169e33dde5e73403c2a36f3d6dbfd2d34d5e9ccd898e79a1eb899bcac947`, `43` entries (repacked via POSIX `tarfile` from official `ggml-org/llama.cpp` `b12019` `llama-b12019-bin-ubuntu-cuda-12.8-x64.tar.gz` + `cudart-llama-b12019-bin-ubuntu-cuda-12.8-x64.tar.gz` — zero compilation) |
 | **Observed live Colab L4 VM** | `NVIDIA L4` (`23034 MiB` VRAM, `sm_89`), Ubuntu 24.04 (GCC 13.3.0 / GLIBC 2.39), Python 3.13, CUDA 13.0.88, 12 CPU cores |
-| **Observed live Colab timings & Run #4 Gate 0–3 metrics** | 12.12 GB Drive -> local NVMe SSD copy: `249.2s`–`289.4s` (~42–49 MB/s); L4 GPU model load: `4.6s`; Gate 2: `49/49` layers offloaded (`10948 MiB` weights + `3072 MiB` KV + compute); Gate 3 VRAM used: `14378 MiB`; Single-slot decode telemetry in `llama.log`: `20.84 tok/s` (`prompt eval = 835.69 tok/s`, `eval = 20.63–20.84 tok/s`) |
+| **Observed live Colab timings & Run #4/#5 metrics** | 12.12 GB Drive -> local NVMe SSD copy: `249.2s`–`381.9s`; L4 GPU model load: `4.6s`; Gate 2: `49/49` layers offloaded (`10948 MiB` weights + `3072 MiB` KV + compute); Gate 3 VRAM used: `14378 MiB` (peak active `14388 MiB`); 4-way Gate 4 speed: `24.1–24.2 tok/s` at 92–100% GPU util (~71–75W) |
 
 ---
 
-## 2. Exhaustive Pitfall & Failure Postmortem Table (C1–C9)
+## 2. Exhaustive Pitfall & Failure Postmortem Table (C1–C10)
 
 | ID | Phase / Event | What Failed & Root Cause | Resolution & Permanent Fix |
 |---|---|---|---|
@@ -65,6 +65,7 @@ All domain rules established in prior `vast.ai` handoffs were preserved verbatim
 | **C7** | Live Colab Run #3 (Gate 2 false-kill + scarce L4 loss) | Live Colab L4 passed Gate 0 (`NVIDIA L4 23034 MiB`), prebuilt `bin/` extraction, 12.12 GB SSD copy (`289.4s`), Gate 1 (`CUDA0`), and `4.6s` GPU model load, then failed Gate 2 (`parse_gpu_offload_log`). Root cause in `llama.log` + `b12019` `common/log.cpp`: `GGML_LOG_LEVEL_INFO` maps to `LOG_LEVEL_TRACE = 4`, while default verbosity is `3`, suppressing `offloaded X/Y layers to GPU`. Unconditional `AUTO_DISCONNECT=True` immediately released a scarce L4 VM. | Added `"-lv", "4"` + `LLAMA_ARG_LOG_VERBOSITY=4`, clean `proc.terminate()` + `llama.log` tail on Gate 2 failure, `0.3 -> 0.1` temperature retry per sample in Sakura `run_preflight_gate`, and later added `DISCONNECT_ON_ERROR` toggle (F4). |
 | **C8** | Comprehensive code review pass before Run #4 | Pre-run audit uncovered 7 remaining correctness/robustness issues (`F1`–`F7`), including an async `common/log.cpp` flush race, a Sakura `roundtrip_mismatches` tautology, missing Hy-MT2 preflight fallback, Drive FUSE per-line checkpoint churn, and unconditional error disconnect. | Fixed all 7 findings (`F1`–`F7`, detailed in §4) in Milestone 8 (`sakura-ollama-colab`) and Milestone 7 (`hymt2-heretic-colab`) and re-verified `py_compile`, `test_all.py` (6/6), and sanitization (0 hits). |
 | **C9** | Live Colab Run #4 (Gate 4 `strict_line_hint` echo + old notebook `DISCONNECT_ON_ERROR=True`) | Run #4 passed Gate 0 (`NVIDIA L4 23034 MiB`), SSD staging (`249.2s`), Gate 1 (`CUDA0`), Gate 2 (`49/49 layers`), and Gate 3 (`14378 MiB VRAM`, `llama.log` `20.84 tok/s`), then failed Gate 4 sample 1 with 2 lines: `'（请严格输出恰好 1 行，一一对应，不要合并或拆分行）\n唯：早上好。睡得好吗？'`. Root cause: `build_sakura_messages(..., strict_line_hint=True)` injected that parenthetical instruction directly after `将下面的文本从日文翻译成简体中文：`, whereas Sakura-GalTransl-14B-v3.8 is fine-tuned to treat everything after `：` as source input, so it echoed that line before producing the accurate translation; `test_all.py` `_make_handler` had masked it via `after.split("\n", 1)[1]`. Additionally, `DISCONNECT_ON_ERROR` defaulted to `True` in Run #4 so the operator's L4 session disconnected immediately; audit also found `LLAMA_ARG_LOG_VERBOSITY=4` alongside `-lv 4` emitted a harmless `llama.log` overwrite warning and real queued data contains 12 asymmetric split-quote lines (`open != close`) that could be rejected if the model closes/opens quotes. | Removed `strict_line_hint` completely so `build_sakura_messages` always emits exact official GalTransl v3.8 prompt syntax (`：\n`); added `(0.3, 0.1, 0.0)` gate retry; removed redundant `LLAMA_ARG_LOG_VERBOSITY` env var (keeping `-lv 4`); added asymmetric split-quote (`trim_close_quote`/`trim_open_quote`) and exclusive `♥`<->`♡` normalization in `normalize_output_line`; defaulted `DISCONNECT_ON_ERROR = False` in both `sakura_colab.ipynb` and `hymt2_colab.ipynb`; hardened `test_all.py` mock handler to HTTP 400 if any text appears between `：` and `\n`. |
+| **C10** | Large 14,269-row production run (`2,235` unique units) exposed 20 edge-case failures + 12 language-QA gaps | Run #5 succeeded on the first 1,808-row job (`24.2 tok/s`), but a 14,269-row production job (`2,235` unique units) finished `2,215` units with `20` hard failures (`46` missing rows) and `12` `no_cjk` / untranslated English rows not caught by existing checks: (1) sequential `wid` shifted whenever overrides were added, preventing safe incremental repair; (2) `repair_quotes` missed mid-sentence non-corner quotes, missing outer quote pairs, and half-width/curly quotes; (3) kana/loanword proper nouns hit `residual_kana` with no `overrides.jsonl` pass-through or glossary substitution path; (4) `{{TAG_n}}` drops lacked normalized `⟦0⟧` encoding and targeted system-prompt retries; (5) `\n` multiline units were prompted whole instead of segment-split and rejoined; (6) no `no_cjk`/`latin_only` QA gate existed to catch English loanword outputs or truncated text (`　」`); (7) `DISCONNECT_ON_ERROR=False` could leave an L4 idle without a bounded timer or explicit `STOP THE RUNTIME NOW` warning; (8) `failures.jsonl` lacked `unit_key`, `attempts`, `expected_placeholders`/`observed_placeholders`, and `suggested_fix`. | Implemented SHA-1 `unit_key` + legacy `wid` migration, generalized `repair_quotes`, internal `⟦0⟧` placeholder encode/decode, `overrides.jsonl` + glossary kana substitution, `\n` segment-split multiline handling, `no_cjk`/`latin_only` QA + verbatim command allowlist, `--repair-only`/`--job`/`--overrides` incremental repair, actionable `failures.jsonl`, and `IDLE_UNASSIGN_MINUTES=15` + `STOP THE RUNTIME NOW` warning in both `sakura_colab.ipynb` and `hymt2_colab.ipynb`. Verified with 15 offline tests + isolated 14,269-row repair dry-run (`cached=2215 | todo=20`). |
 
 ---
 
@@ -110,12 +111,12 @@ Completed in **Milestone 8** (`sakura-ollama-colab`) and **Milestone 7** (`hymt2
 
 ## 5. Current Readiness & Verification Matrix
 
-| Check / Stage | `sakura-ollama-colab` (Milestone 9) | `hymt2-heretic-colab` (Milestone 8) | Notes |
+| Check / Stage | `sakura-ollama-colab` (Milestone 10) | `hymt2-heretic-colab` (Milestone 9) | Notes |
 |---|---|---|---|
-| `py_compile` (`schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py`) | `done` (pass) | `done` (pass) | Verified after C9 edits |
-| `test_all.py` (offline suite: mock SSE/HTTP, strict prompt HTTP 400 check, split-quote/heart normalization, gates, zero-compile bundle, `-lv 4`, `.ipynb` AST + `DISCONNECT_ON_ERROR = False`) | `done` (6/6 pass) | `done` (6/6 pass) | Executed after C9 edits using local mocks and temp dirs |
-| 1,808-record real-data offline stress test | `done` (pass) | `n/a` | Strict prompt check + auto-closed asymmetric split-quote stress test in temp dir |
+| `py_compile` (`schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py`) | `done` (pass) | `done` (pass) | Verified after C10 edits |
+| `test_all.py` (offline suite: 15 tests on Sakura incl. quote/kana/placeholder/multiline/language-QA/unit_key/repair-only/DONE-gate/ID-parity; 6 tests on Hy-MT2 + `IDLE_UNASSIGN_MINUTES`) | `done` (15/15 pass) | `done` (6/6 pass) | Executed after C10 edits using local mocks and temp dirs |
+| Isolated 14,269-row `--repair-only` dry-run | `done` (pass) | `n/a` | Verified `cached=2215 | todo=20` on temp copy without altering live checkpoint |
 | Sanitization scan (zero secrets, local paths, forbidden strings, game text) | `done` (0 hits) | `done` (0 hits) | Verified across repository deliverables and handoff docs |
 | GitHub Release `colab-l4-llama-b12019` (`llama-server-l4-b12019.tar.gz`) | `done` (HTTP 200) | `done` (HTTP 200) | `773,245,209` bytes, SHA-256 `802a169e33dde5e73403c2a36f3d6dbfd2d34d5e9ccd898e79a1eb899bcac947`, 43 entries |
-| Live Colab L4 Gates 0–3 (`NVIDIA L4 23034 MiB`, `49/49` layers, `14378 MiB`, `20.84 tok/s`) | `done` (pass on Run #4) | `not tested` | Sakura Run #4 passed Gates 0–3 on real L4 before C9 prompt fix |
-| Live Colab L4 Gate 4 + full end-to-end translation run | `not tested` | `not tested` | Requires operator live Colab L4 rerun after Milestone 9 / Milestone 8 push |
+| Live Colab L4 Gates 0–4 + 1,808-row run (`24.2 tok/s`, 92–100% GPU util) | `done` (pass on Run #5) | `not tested` | Sakura Run #5 completed full 1,808-row pipeline; 14k production run surfaced C10 |
+| Live Colab L4 `--repair-only` / Milestone 10 post-C10 run | `not tested` | `not tested` | Requires operator live Colab L4 run after Milestone 10 / Milestone 9 push |

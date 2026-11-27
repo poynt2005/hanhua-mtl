@@ -75,6 +75,11 @@ _TEMPLATE_LEAK_RE = re.compile(
 )
 _GENERIC_SPEAKER_RE = re.compile(r"^[^「」『』：:\n]{1,20}[：:]\s*")
 _OFFLOAD_RE = re.compile(r"offloaded\s+(\d+)\s*/\s*(\d+)\s+layers\s+to\s+GPU", re.I)
+_SPACED_PH_RE = re.compile(r"\u27e6\s*(\d+)\s*\u27e7")
+_PUNCT_STRIP_RE = re.compile(r"[「」『』\"'‘’“”（）()\[\]…・！？!?、。，．—─ー~～]+")
+_PURE_NUM_SYM_RE = re.compile(r"^[0-9.,:;/+\-_%#]+$")
+_ASCII_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]*")
+REPAIR_FLAG_PREFIXES = ("repair_", "trim_", "add_", "heart_norm", "glossary_subst")
 
 _CC_CACHE: dict[str, Any] = {}
 _CC_LOCK = threading.Lock()
@@ -616,17 +621,59 @@ def _match_glossary(batch_units: list[dict[str, Any]], glossary_cn: list[dict[st
     return hits[:50]
 
 
-def _format_source_line(unit: dict[str, Any]) -> str:
+def make_unit_key(kind: str, speaker: str | None, text: str) -> str:
+    """Stable SHA-1 identity independent of sequential display wid."""
+    raw = f"{kind}\0{speaker or ''}\0{text}".encode("utf-8")
+    return hashlib.sha1(raw).hexdigest()
+
+
+def encode_placeholders(text: str) -> tuple[str, list[str]]:
+    """Normalize {{TAG_n}} / ⟦n⟧ / \\Cmd[n] tokens to sequential ⟦0⟧, ⟦1⟧, ..."""
+    tokens: list[str] = []
+    tok_to_idx: dict[str, int] = {}
+
+    def _sub(m: re.Match[str]) -> str:
+        tok = m.group(0)
+        if tok not in tok_to_idx:
+            tok_to_idx[tok] = len(tokens)
+            tokens.append(tok)
+        return f"\u27e6{tok_to_idx[tok]}\u27e7"
+
+    encoded = schema.PLACEHOLDER_RE.sub(_sub, text or "")
+    return encoded, tokens
+
+
+def decode_placeholders(text: str, tokens: list[str]) -> tuple[str, list[str]]:
+    """Restore original placeholder tokens from ⟦i⟧ markers."""
+    if not tokens:
+        return text, []
+    flags: list[str] = []
+    normalized = _SPACED_PH_RE.sub(lambda m: f"\u27e6{m.group(1)}\u27e7", text)
+    if normalized != text:
+        flags.append("repair_placeholder")
+
+    def _restore(m: re.Match[str]) -> str:
+        idx = int(m.group(1))
+        if 0 <= idx < len(tokens):
+            return tokens[idx]
+        return m.group(0)
+
+    return _SPACED_PH_RE.sub(_restore, normalized), flags
+
+
+def _format_source_line(unit: dict[str, Any]) -> tuple[str, list[str]]:
+    encoded_text, tokens = encode_placeholders(unit["text"])
     spk = unit.get("speaker")
     if unit["kind"] == "dialogue" and spk:
-        return f"{spk}：{unit['text']}"
-    return unit["text"]
+        return f"{spk}：{encoded_text}", tokens
+    return encoded_text, tokens
 
 
 def build_sakura_messages(
     batch_units: list[dict[str, Any]],
     glossary_cn: list[dict[str, str]],
     history_lines: list[str],
+    extra_system_hint: str = "",
 ) -> list[dict[str, str]]:
     is_ui_only = all(u["kind"] in ("ui", "system") for u in batch_units)
     hist_block = "\n".join(history_lines[-4:]) if (history_lines and not is_ui_only) else ""
@@ -637,7 +684,16 @@ def build_sakura_messages(
         if ent.get("note"):
             line += f" #{ent['note']}"
         term_lines.append(line)
-    src_lines = [_format_source_line(u) for u in batch_units]
+
+    src_lines: list[str] = []
+    max_ph = 0
+    for u in batch_units:
+        formatted, tokens = _format_source_line(u)
+        src_lines.append(formatted)
+        if len(tokens) > max_ph:
+            max_ph = len(tokens)
+    for idx in range(max_ph):
+        term_lines.append(f"\u27e6{idx}\u27e7->\u27e6{idx}\u27e7 #占位符，原样保留")
 
     parts = [
         f"历史翻译：\n{hist_block}",
@@ -645,8 +701,9 @@ def build_sakura_messages(
         "根据以上术语表的对应关系和备注，结合历史剧情和上下文，将下面的文本从日文翻译成简体中文：\n"
         + "\n".join(src_lines),
     ]
+    sys_content = f"{SYSTEM_PROMPT} {extra_system_hint}" if extra_system_hint else SYSTEM_PROMPT
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": sys_content},
         {"role": "user", "content": "\n\n".join(parts)},
     ]
 
@@ -687,47 +744,141 @@ def strip_inner_speaker(line: str, unit: dict[str, Any], known_speakers_desc: li
     return s
 
 
-def normalize_output_line(
-    raw_line: str,
-    unit: dict[str, Any],
-    known_speakers_desc: list[str],
-) -> tuple[str, str | None, list[str]]:
-    """Strip mirrored speaker prefixes, fix split-quote/heart drift, restore indent, normalize t2s (never retry)."""
-    s = raw_line.strip()
-    s = strip_speaker_prefix(s, unit, known_speakers_desc)
-    s = strip_inner_speaker(s, unit, known_speakers_desc)
+def repair_quotes(source: str, output: str) -> tuple[str, list[str]]:
+    """Deterministically repair quote count/style drift without rewriting text semantics."""
+    src_o = source.count("「")
+    src_c = source.count("」")
+    if src_o == 0 and src_c == 0:
+        return output, []
+
+    s = output
     flags: list[str] = []
 
-    src_text = unit["text"]
-    src_open = src_text.count("「")
-    src_close = src_text.count("」")
+    if "\uff62" not in source and "\uff63" not in source and ("\uff62" in s or "\uff63" in s):
+        s2 = s.replace("\uff62", "「").replace("\uff63", "」")
+        if s2 != s:
+            s = s2
+            flags.append("repair_halfwidth_quotes")
+
+    if src_o == src_c and (s.count("「") < src_o or s.count("」") < src_c):
+        deficit_o = src_o - s.count("「")
+        deficit_c = src_c - s.count("」")
+        if deficit_o == deficit_c and deficit_o > 0:
+            if (
+                "“" not in source
+                and "”" not in source
+                and s.count("“") == deficit_o
+                and s.count("”") == deficit_c
+            ):
+                s = s.replace("“", "「").replace("”", "」")
+                flags.append("repair_curly_quotes")
+            elif '"' not in source and s.count('"') == 2 * deficit_o:
+                chars: list[str] = []
+                is_open = True
+                for ch in s:
+                    if ch == '"':
+                        chars.append("「" if is_open else "」")
+                        is_open = not is_open
+                    else:
+                        chars.append(ch)
+                s = "".join(chars)
+                flags.append("repair_ascii_quotes")
+            elif (
+                "『" not in source
+                and "』" not in source
+                and s.count("『") == deficit_o
+                and s.count("』") == deficit_c
+            ):
+                s = s.replace("『", "「").replace("』", "」")
+                flags.append("repair_double_brackets")
+
+    if s.count("「") == src_o and s.count("」") == src_c:
+        return s, flags
+
+    while s.startswith("「「") and s.count("「") > src_o:
+        s = s[1:]
+        if "trim_dup_open_quote" not in flags:
+            flags.append("trim_dup_open_quote")
+    while s.endswith("」」") and s.count("」") > src_c:
+        s = s[:-1]
+        if "trim_dup_close_quote" not in flags:
+            flags.append("trim_dup_close_quote")
     if (
-        src_open == 1
-        and src_close == 0
-        and src_text.startswith("「")
-        and s.count("「") == 1
-        and s.count("」") == 1
+        s.startswith("「")
+        and s.endswith("」")
+        and s.count("「") == src_o + 1
+        and s.count("」") == src_c + 1
+    ):
+        s = s[1:-1]
+        flags.append("trim_outer_quote_pair")
+
+    out_o = s.count("「")
+    out_c = s.count("」")
+    if out_o == src_o and out_c == src_c:
+        return s, flags
+
+    if (
+        src_o == 1
+        and src_c == 0
+        and source.startswith("「")
+        and out_o == 1
+        and out_c == 1
         and s.startswith("「")
         and s.endswith("」")
     ):
         s = s[:-1]
         flags.append("trim_close_quote")
     elif (
-        src_open == 0
-        and src_close == 1
-        and src_text.endswith("」")
-        and s.count("「") == 1
-        and s.count("」") == 1
+        src_o == 0
+        and src_c == 1
+        and source.endswith("」")
+        and out_o == 1
+        and out_c == 1
         and s.startswith("「")
         and s.endswith("」")
     ):
         s = s[1:]
         flags.append("trim_open_quote")
+    elif src_o == 1 and src_c == 1 and source.startswith("「") and source.endswith("」"):
+        if out_o == 0 and out_c == 0:
+            s = f"「{s}」"
+            flags.append("add_quote_pair")
+        elif out_o == 1 and out_c == 0 and s.startswith("「"):
+            s = f"{s}」"
+            flags.append("add_close_quote")
+        elif out_o == 0 and out_c == 1 and s.endswith("」"):
+            s = f"「{s}"
+            flags.append("add_open_quote")
+
+    return s, flags
+
+
+def normalize_output_line(
+    raw_line: str,
+    unit: dict[str, Any],
+    known_speakers_desc: list[str],
+    matched_glossary: list[dict[str, str]] | None = None,
+) -> tuple[str, str | None, list[str]]:
+    """Strip mirrored speaker prefixes, repair quotes/hearts/kana glossary, restore indent, normalize t2s."""
+    s = raw_line.strip()
+    s = strip_speaker_prefix(s, unit, known_speakers_desc)
+    s = strip_inner_speaker(s, unit, known_speakers_desc)
+    src_text = unit["text"]
+    s, flags = repair_quotes(src_text, s)
 
     if "♥" in src_text and "♡" not in src_text and "♡" in s and "♥" not in s:
         s = s.replace("♡", "♥")
+        flags.append("heart_norm")
     elif "♡" in src_text and "♥" not in src_text and "♥" in s and "♡" not in s:
         s = s.replace("♥", "♡")
+        flags.append("heart_norm")
+
+    if _KANA_RE.search(s) and matched_glossary:
+        for ent in sorted(matched_glossary, key=lambda e: len(e["src"]), reverse=True):
+            if _KANA_RE.search(ent["src"]) and ent["src"] in s:
+                s = s.replace(ent["src"], ent["dst"])
+                if "glossary_subst" not in flags:
+                    flags.append("glossary_subst")
 
     if src_text.startswith("\u3000") and not s.startswith("\u3000"):
         s = "\u3000" + s.lstrip()
@@ -739,7 +890,52 @@ def normalize_output_line(
     return canonical, raw_saved, flags
 
 
-def validate_unit_translation(src_text: str, zh_cn: str) -> list[str]:
+def is_allowlisted_no_cjk(
+    src_text: str,
+    zh_cn: str,
+    allowlist: tuple[re.Pattern[str], ...] = (),
+) -> bool:
+    """Allow pure numbers or ASCII identifiers/commands that appeared verbatim in source."""
+    no_ph = schema.PLACEHOLDER_RE.sub("", zh_cn or "")
+    core = _PUNCT_STRIP_RE.sub("", no_ph).strip()
+    if not core:
+        return False
+    if _PURE_NUM_SYM_RE.fullmatch(core):
+        return True
+    for pat in allowlist:
+        if pat.search(core):
+            return True
+    words = _ASCII_WORD_RE.findall(core)
+    if words:
+        src_lower = src_text.lower()
+        return all(w.lower() in src_lower for w in words)
+    return False
+
+
+def check_language_qa(
+    src_text: str,
+    zh_cn: str,
+    allowlist: tuple[re.Pattern[str], ...] = (),
+) -> list[str]:
+    """Ensure Japanese-bearing units actually produce Chinese (no CJK / Latin-only failures)."""
+    if not _JA_PRESENT_RE.search(src_text or ""):
+        return []
+    if _CJK_RE.search(zh_cn or ""):
+        return []
+    if is_allowlisted_no_cjk(src_text, zh_cn, allowlist):
+        return []
+    errs = ["no_cjk"]
+    stripped_ph = schema.PLACEHOLDER_RE.sub("", zh_cn or "")
+    if re.search(r"[A-Za-z]", stripped_ph):
+        errs.append("latin_only")
+    return errs
+
+
+def validate_unit_translation(
+    src_text: str,
+    zh_cn: str,
+    allowlist: tuple[re.Pattern[str], ...] = (),
+) -> list[str]:
     errs: list[str] = []
     if not zh_cn or not zh_cn.strip():
         errs.append("empty")
@@ -757,6 +953,7 @@ def validate_unit_translation(src_text: str, zh_cn: str) -> list[str]:
         src_text.count("「") != zh_cn.count("「") or src_text.count("」") != zh_cn.count("」")
     ):
         errs.append("quote_asymmetry_mismatch")
+    errs.extend(check_language_qa(src_text, zh_cn, allowlist=allowlist))
     return errs
 
 
@@ -827,35 +1024,188 @@ def _split_batches(units: list[dict[str, Any]], max_batch: int = 8) -> list[list
     return batches
 
 
+def _hint_for_errors(errs: list[str]) -> str:
+    if "placeholder_mismatch" in errs:
+        return "必须原样保留所有占位符标记（如⟦0⟧、⟦1⟧），不要删除、翻译、重复或调换顺序。"
+    if "quote_asymmetry_mismatch" in errs:
+        return "请严格保留原文中「和」的数量与位置，不要将「」替换为其他引号，也不要省略。"
+    if "residual_kana" in errs:
+        return "请将所有日文假名（包括外来语、专有名词、人名与道具名）完整翻译或音译为简体中文，禁止在译文中保留任何平假名或片假名。"
+    if "no_cjk" in errs or "latin_only" in errs:
+        return "必须完整输出简体中文译文，禁止输出英文单词或省略正文。"
+    return ""
+
+
+def _build_failure_record(
+    unit: dict[str, Any],
+    errs: list[str],
+    attempts: int,
+    observed_text: str,
+    glossary_cn: list[dict[str, str]],
+) -> dict[str, Any]:
+    expected_ph = schema.extract_placeholders(unit["text"])
+    observed_ph = schema.extract_placeholders(observed_text)
+    suggested = "override"
+    if "residual_kana" in errs:
+        matched = _match_glossary([unit], glossary_cn)
+        if matched:
+            suggested = "override:" + ",".join(f"{e['src']}->{e['dst']}" for e in matched)
+        else:
+            suggested = "glossary_or_override"
+    elif "placeholder_mismatch" in errs:
+        suggested = "override_keep_tags"
+    elif "quote_asymmetry_mismatch" in errs:
+        suggested = "override_keep_quotes"
+    return {
+        "unit_key": unit["unit_key"],
+        "wid": unit["wid"],
+        "text": unit["text"],
+        "errors": errs,
+        "attempts": attempts,
+        "expected_placeholders": expected_ph,
+        "observed_placeholders": observed_ph,
+        "suggested_fix": suggested,
+        "needs_override": True,
+        "source_kind": unit["kind"],
+    }
+
+
+def _process_model_line(
+    raw_line: str,
+    unit: dict[str, Any],
+    tokens: list[str],
+    known_speakers_desc: list[str],
+    matched_glossary: list[dict[str, str]],
+) -> tuple[str, str | None, list[str], list[str]]:
+    decoded, ph_flags = decode_placeholders(raw_line, tokens)
+    cn, raw_saved, flags = normalize_output_line(
+        decoded, unit, known_speakers_desc, matched_glossary=matched_glossary
+    )
+    all_flags = ph_flags + flags
+    errs = validate_unit_translation(unit["text"], cn)
+    return cn, raw_saved, all_flags, errs
+
+
+def _translate_single_unit(
+    api_base: str,
+    unit: dict[str, Any],
+    glossary_cn: list[dict[str, str]],
+    history: list[str],
+    known_speakers_desc: list[str],
+) -> tuple[str | None, str | None, list[str], dict[str, Any] | None]:
+    matched = _match_glossary([unit], glossary_cn)
+    _, tokens = encode_placeholders(unit["text"])
+    schedule = ((0.3, True), (0.1, True), (0.0, False))
+    last_err: list[str] = ["unknown"]
+    last_obs = ""
+    attempts = 0
+    extra_hint = ""
+    for idx, (temp, use_hist) in enumerate(schedule):
+        attempts = idx + 1
+        msgs = build_sakura_messages(
+            [unit],
+            glossary_cn,
+            history if use_hist else [],
+            extra_system_hint=extra_hint,
+        )
+        try:
+            raw, _, _ = chat_stream(
+                api_base, MODEL_ALIAS, msgs, temperature=temp, top_p=0.8, max_tokens=512
+            )
+        except Exception as exc:
+            last_err = [f"transport:{exc}"]
+            continue
+        lines = [ln for ln in raw.splitlines() if ln.strip()]
+        if len(lines) != 1:
+            last_err = [f"line_count:{len(lines)}!=1"]
+            last_obs = raw
+            continue
+        cn, raw_saved, flags, errs = _process_model_line(
+            lines[0], unit, tokens, known_speakers_desc, matched
+        )
+        if not errs:
+            return cn, raw_saved, flags, None
+        last_err = errs
+        last_obs = cn
+        extra_hint = _hint_for_errors(errs)
+    return None, None, [], _build_failure_record(unit, last_err, attempts, last_obs, glossary_cn)
+
+
 def _translate_single_multiline(
     api_base: str,
     unit: dict[str, Any],
     glossary_cn: list[dict[str, str]],
     history: list[str],
     known_speakers_desc: list[str],
-) -> tuple[str | None, str | None, list[str], list[str]]:
-    expected_lines = unit["text"].splitlines()
-    for attempt_temp, use_hist in ((0.3, True), (0.1, True), (0.1, False)):
-        msgs = build_sakura_messages(
-            [unit],
-            glossary_cn,
-            history if use_hist else [],
+) -> tuple[str | None, str | None, list[str], dict[str, Any] | None]:
+    raw_segments = unit["text"].split("\n")
+    out_segments: list[str] = []
+    raw_segments_out: list[str] = []
+    agg_flags: list[str] = []
+    seg_hist = list(history)
+    total_attempts = 0
+    saw_first_nonempty = False
+
+    for seg in raw_segments:
+        if not seg.strip():
+            out_segments.append(seg)
+            raw_segments_out.append(seg)
+            continue
+        seg_unit = {
+            "unit_key": unit["unit_key"],
+            "wid": unit["wid"],
+            "file": unit["file"],
+            "kind": unit["kind"],
+            "speaker": unit.get("speaker") if not saw_first_nonempty else None,
+            "text": seg,
+        }
+        saw_first_nonempty = True
+        cn_seg, raw_seg, seg_flags, fail_rec = _translate_single_unit(
+            api_base, seg_unit, glossary_cn, seg_hist, known_speakers_desc
         )
-        try:
-            raw, _, _ = chat_stream(
-                api_base, MODEL_ALIAS, msgs, temperature=attempt_temp, top_p=0.8, max_tokens=1024
-            )
-        except Exception:
-            continue
-        out_lines = [ln for ln in raw.splitlines() if ln.strip()]
-        if len(out_lines) != len(expected_lines):
-            continue
-        joined = "\n".join(out_lines)
-        cn, raw_saved, flags = normalize_output_line(joined, unit, known_speakers_desc)
-        errs = validate_unit_translation(unit["text"], cn)
-        if not errs:
-            return cn, raw_saved, flags, []
-    return None, None, [], ["multiline_failed"]
+        if fail_rec is not None or cn_seg is None:
+            total_attempts += fail_rec["attempts"] if fail_rec else 1
+            errs = ["multiline_failed"] + (fail_rec["errors"] if fail_rec else [])
+            obs = "\n".join(out_segments)
+            return None, None, [], _build_failure_record(unit, errs, total_attempts, obs, glossary_cn)
+        total_attempts += 1
+        out_segments.append(cn_seg)
+        raw_segments_out.append(raw_seg if raw_seg is not None else cn_seg)
+        for fl in seg_flags:
+            if fl not in agg_flags:
+                agg_flags.append(fl)
+        if unit["kind"] not in ("ui", "system"):
+            seg_hist = (seg_hist + [cn_seg])[-4:]
+
+    if len(out_segments) != len(raw_segments):
+        return (
+            None,
+            None,
+            [],
+            _build_failure_record(
+                unit,
+                ["multiline_failed", "segment_count_mismatch"],
+                total_attempts,
+                "\n".join(out_segments),
+                glossary_cn,
+            ),
+        )
+
+    joined = "\n".join(out_segments)
+    errs = validate_unit_translation(unit["text"], joined)
+    if errs:
+        return (
+            None,
+            None,
+            [],
+            _build_failure_record(unit, ["multiline_failed"] + errs, total_attempts, joined, glossary_cn),
+        )
+    raw_joined = (
+        "\n".join(raw_segments_out)
+        if any(r != c for r, c in zip(raw_segments_out, out_segments))
+        else None
+    )
+    return joined, raw_joined, agg_flags, None
 
 
 def _translate_batch_recursive(
@@ -865,77 +1215,74 @@ def _translate_batch_recursive(
     history: list[str],
     known_speakers_desc: list[str],
 ) -> tuple[dict[str, tuple[str, str | None, list[str]]], list[dict[str, Any]], list[str]]:
-    """Returns (succeeded_map, failed_records, updated_history)."""
-    if len(batch) == 1 and "\n" in batch[0]["text"]:
+    """Returns (succeeded_map_by_unit_key, failed_records, updated_history)."""
+    if len(batch) == 1:
         u = batch[0]
-        cn, raw_saved, flags, errs = _translate_single_multiline(
-            api_base, u, glossary_cn, history, known_speakers_desc
-        )
-        if cn is not None:
-            return {u["wid"]: (cn, raw_saved, flags)}, [], (history + [cn])[-4:]
-        return {}, [{"wid": u["wid"], "text": u["text"], "errors": errs}], history
+        if "\n" in u["text"]:
+            cn, raw_saved, flags, fail_rec = _translate_single_multiline(
+                api_base, u, glossary_cn, history, known_speakers_desc
+            )
+        else:
+            cn, raw_saved, flags, fail_rec = _translate_single_unit(
+                api_base, u, glossary_cn, history, known_speakers_desc
+            )
+        if fail_rec is None and cn is not None:
+            new_hist = history if u["kind"] in ("ui", "system") else (history + [cn])[-4:]
+            return {u["unit_key"]: (cn, raw_saved, flags)}, [], new_hist
+        assert fail_rec is not None
+        return {}, [fail_rec], history
 
-    temps = (0.3, 0.1, 0.1)
-    last_err: list[str] = ["unknown"]
-    for idx, temp in enumerate(temps):
-        use_hist = history if (len(batch) > 1 or idx < 2) else []
-        msgs = build_sakura_messages(batch, glossary_cn, use_hist)
+    matched = _match_glossary(batch, glossary_cn)
+    unit_tokens = [encode_placeholders(u["text"])[1] for u in batch]
+    for temp in (0.3, 0.1):
+        msgs = build_sakura_messages(batch, glossary_cn, history)
         try:
             raw, _, _ = chat_stream(
-                api_base,
-                MODEL_ALIAS,
-                msgs,
-                temperature=temp,
-                top_p=0.8,
-                max_tokens=2048 if len(batch) > 1 else 512,
+                api_base, MODEL_ALIAS, msgs, temperature=temp, top_p=0.8, max_tokens=2048
             )
-        except Exception as exc:
-            last_err = [f"transport:{exc}"]
+        except Exception:
             continue
 
         lines = [ln for ln in raw.splitlines() if ln.strip()]
         if len(lines) != len(batch):
-            last_err = [f"line_count:{len(lines)}!={len(batch)}"]
             continue
 
         parsed: dict[str, tuple[str, str | None, list[str]]] = {}
         batch_ok = True
-        batch_errs: list[str] = []
         new_hist = list(history)
-        for u, ln in zip(batch, lines):
-            cn, raw_saved, flags = normalize_output_line(ln, u, known_speakers_desc)
-            errs = validate_unit_translation(u["text"], cn)
+        for u, tokens, ln in zip(batch, unit_tokens, lines):
+            cn, raw_saved, flags, errs = _process_model_line(
+                ln, u, tokens, known_speakers_desc, matched
+            )
             if errs:
                 batch_ok = False
-                batch_errs = errs
                 break
-            parsed[u["wid"]] = (cn, raw_saved, flags)
+            parsed[u["unit_key"]] = (cn, raw_saved, flags)
             if u["kind"] not in ("ui", "system"):
                 new_hist.append(cn)
         if batch_ok:
             return parsed, [], new_hist[-4:]
-        last_err = batch_errs
 
-    if len(batch) > 1:
-        mid = len(batch) // 2
-        left_ok, left_fail, hist_mid = _translate_batch_recursive(
-            api_base, batch[:mid], glossary_cn, history, known_speakers_desc
-        )
-        right_ok, right_fail, hist_end = _translate_batch_recursive(
-            api_base, batch[mid:], glossary_cn, hist_mid, known_speakers_desc
-        )
-        merged = dict(left_ok)
-        merged.update(right_ok)
-        return merged, left_fail + right_fail, hist_end
-
-    u = batch[0]
-    return {}, [{"wid": u["wid"], "text": u["text"], "errors": last_err}], history
+    mid = len(batch) // 2
+    left_ok, left_fail, hist_mid = _translate_batch_recursive(
+        api_base, batch[:mid], glossary_cn, history, known_speakers_desc
+    )
+    right_ok, right_fail, hist_end = _translate_batch_recursive(
+        api_base, batch[mid:], glossary_cn, hist_mid, known_speakers_desc
+    )
+    merged = dict(left_ok)
+    merged.update(right_ok)
+    return merged, left_fail + right_fail, hist_end
 
 
-def _load_checkpoint(ckpt_path: Path) -> dict[str, dict[str, Any]]:
+def _load_checkpoint(
+    ckpt_path: Path,
+    legacy_wid_to_key: dict[str, str] | None = None,
+) -> tuple[dict[str, dict[str, Any]], int]:
     done: dict[str, dict[str, Any]] = {}
+    migrated = 0
     if not ckpt_path.is_file():
-        return done
+        return done, migrated
     with open(ckpt_path, "r", encoding="utf-8-sig") as handle:
         for raw in handle:
             s = raw.strip()
@@ -945,11 +1292,55 @@ def _load_checkpoint(ckpt_path: Path) -> dict[str, dict[str, Any]]:
                 obj = json.loads(s)
             except ValueError:
                 continue
-            wid = obj.get("wid")
             zh_cn = obj.get("zh_cn")
-            if isinstance(wid, str) and isinstance(zh_cn, str) and zh_cn.strip():
-                done[wid] = obj
-    return done
+            if not isinstance(zh_cn, str) or not zh_cn.strip():
+                continue
+            uk = obj.get("unit_key")
+            if isinstance(uk, str) and uk.strip():
+                done[uk] = obj
+                continue
+            wid = obj.get("wid")
+            if isinstance(wid, str) and legacy_wid_to_key and wid in legacy_wid_to_key:
+                key = legacy_wid_to_key[wid]
+                done[key] = {**obj, "unit_key": key}
+                migrated += 1
+    return done, migrated
+
+
+def load_overrides_file(path: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """Load manual overrides keyed by record id and/or unit_key."""
+    by_id: dict[str, str] = {}
+    by_key: dict[str, str] = {}
+    if not path.is_file():
+        return by_id, by_key
+    with open(path, "r", encoding="utf-8-sig") as handle:
+        for lineno, raw in enumerate(handle, start=1):
+            s = raw.strip()
+            if not s:
+                continue
+            obj = json.loads(s)
+            val = obj.get("translation")
+            if val is None:
+                val = obj.get("zh_cn")
+            if val is None:
+                val = obj.get("override")
+            if not isinstance(val, str) or not val.strip():
+                raise schema.SchemaError(
+                    f"{path.name}:{lineno}: override requires non-empty translation/zh_cn/override"
+                )
+            rid = obj.get("id")
+            uk = obj.get("unit_key")
+            if isinstance(rid, str) and rid.strip():
+                by_id[rid] = val
+            elif isinstance(uk, str) and uk.strip():
+                by_key[uk] = val
+            elif isinstance(obj.get("kind"), str) and isinstance(obj.get("text"), str):
+                by_key[make_unit_key(obj["kind"], obj.get("speaker"), obj["text"])] = val
+            else:
+                raise schema.SchemaError(
+                    f"{path.name}:{lineno}: override row needs 'id', 'unit_key', or ('kind' + 'text')"
+                )
+    return by_id, by_key
 
 
 def _log_gpu_progress(done_count: int, total_count: int, gpu_log: Path, skip_gpu_check: bool) -> None:
@@ -981,9 +1372,11 @@ def translate_job(
     force: bool = False,
     manifest_wait: float = 60.0,
     skip_gpu_check: bool = False,
+    overrides_path: Path | None = None,
+    repair_only: bool = False,
 ) -> dict[str, Any]:
     try:
-        if not force and schema.done_marker_path(output_dir, job).is_file():
+        if not force and not repair_only and schema.done_marker_path(output_dir, job).is_file():
             schema.verify_done_marker(output_dir, job)
             print(f"[job] {job}: DONE marker verified, skipping (use --force to rerun)")
             return {"job": job, "status": "skipped_done"}
@@ -993,6 +1386,9 @@ def translate_job(
     schema.verify_manifest(input_path, wait_sec=manifest_wait)
     records = schema.validate_jsonl_file(input_path)
     glossary_cn = _prepare_glossary_simplified(glossary_entries)
+
+    eff_overrides = overrides_path if overrides_path is not None else input_path.with_name(f"{job}.overrides.jsonl")
+    ov_by_id, ov_by_key = load_overrides_file(eff_overrides) if eff_overrides.is_file() else ({}, {})
 
     # Known speakers longest-first for accurate prefix stripping
     speaker_set: set[str] = set()
@@ -1004,43 +1400,66 @@ def translate_job(
             speaker_set.add(str(rec["speaker"]))
     known_speakers_desc = sorted(speaker_set, key=len, reverse=True)
 
-    # Deduplicate translatable records by (kind, speaker, text)
+    # First pass without external overrides builds exact legacy sequential wid -> unit_key map
+    legacy_wid_to_key: dict[str, str] = {}
+    legacy_seen: set[str] = set()
+    for rec in records:
+        if rec.get("override") is not None or not needs_translation(rec):
+            continue
+        uk = make_unit_key(rec["kind"], rec.get("speaker"), rec["text"])
+        if uk not in legacy_seen:
+            legacy_seen.add(uk)
+            legacy_wid_to_key[f"w{len(legacy_seen):06d}"] = uk
+
+    # Deduplicate translatable records by stable unit_key = sha1(kind\0speaker\0text)
     work_units: list[dict[str, Any]] = []
-    key_to_wid: dict[tuple[str, str, str], str] = {}
-    rec_to_wid: dict[str, str] = {}
+    seen_keys: dict[str, dict[str, Any]] = {}
+    rec_to_unit_key: dict[str, str] = {}
+    override_cn: dict[str, str] = {}
     passthrough_cn: dict[str, str] = {}
 
     for rec in records:
+        rid = rec["id"]
         if rec.get("override") is not None:
-            passthrough_cn[rec["id"]] = to_simplified(str(rec["override"]))
+            override_cn[rid] = to_simplified(str(rec["override"]))
+            continue
+        if rid in ov_by_id:
+            override_cn[rid] = to_simplified(ov_by_id[rid])
+            continue
+        uk = make_unit_key(rec["kind"], rec.get("speaker"), rec["text"])
+        if uk in ov_by_key:
+            override_cn[rid] = to_simplified(ov_by_key[uk])
             continue
         if not needs_translation(rec):
-            passthrough_cn[rec["id"]] = rec["text"]
+            passthrough_cn[rid] = rec["text"]
             continue
-        key = (rec["kind"], rec.get("speaker") or "", rec["text"])
-        if key not in key_to_wid:
+        if uk not in seen_keys:
             wid = f"w{len(work_units) + 1:06d}"
-            key_to_wid[key] = wid
-            work_units.append(
-                {
-                    "wid": wid,
-                    "file": rec["file"],
-                    "kind": rec["kind"],
-                    "speaker": rec.get("speaker"),
-                    "text": rec["text"],
-                }
-            )
-        rec_to_wid[rec["id"]] = key_to_wid[key]
+            unit_obj = {
+                "unit_key": uk,
+                "wid": wid,
+                "file": rec["file"],
+                "kind": rec["kind"],
+                "speaker": rec.get("speaker"),
+                "text": rec["text"],
+            }
+            seen_keys[uk] = unit_obj
+            work_units.append(unit_obj)
+        rec_to_unit_key[rid] = uk
 
     ckpt_path = work_dir / f"{job}.checkpoint.jsonl"
     failures_path = work_dir / f"{job}.failures.jsonl"
     gpu_log = work_dir / f"{job}.gpu.log"
-    done_map = _load_checkpoint(ckpt_path)
+    done_map, migrated = _load_checkpoint(ckpt_path, legacy_wid_to_key=legacy_wid_to_key)
+    if migrated:
+        print(f"[ckpt] Migrated {migrated} legacy wid-only checkpoint rows by unit_key")
 
-    todo_units = [u for u in work_units if u["wid"] not in done_map]
+    todo_units = [u for u in work_units if u["unit_key"] not in done_map]
+    cached_count = len(work_units) - len(todo_units)
     print(
         f"[job] {job}: total={len(records)} | passthrough={len(passthrough_cn)} | "
-        f"unique_work={len(work_units)} | cached={len(done_map)} | todo={len(todo_units)}"
+        f"overrides={len(override_cn)} | unique_work={len(work_units)} | "
+        f"cached={cached_count} | todo={len(todo_units)}"
     )
 
     # Group todo units by file; if single large file, split into 4 chunks to saturate -np 4
@@ -1055,7 +1474,7 @@ def translate_job(
 
     ckpt_lock = threading.Lock()
     gpu_log_lock = threading.Lock()
-    progress_counter = {"count": len(done_map)}
+    progress_counter = {"count": cached_count}
     all_failures: list[dict[str, Any]] = []
 
     def _run_queue(q_units: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1070,14 +1489,18 @@ def translate_job(
                 cur_done = 0
                 with ckpt_lock:
                     with open(ckpt_path, "a", encoding="utf-8", newline="\n") as fh:
-                        for wid, (cn, raw_saved, flags) in ok_map.items():
-                            row: dict[str, Any] = {"wid": wid, "zh_cn": cn}
+                        for uk, (cn, raw_saved, flags) in ok_map.items():
+                            row: dict[str, Any] = {
+                                "unit_key": uk,
+                                "wid": seen_keys[uk]["wid"],
+                                "zh_cn": cn,
+                            }
                             if raw_saved is not None:
                                 row["raw"] = raw_saved
                             if flags:
                                 row["flags"] = flags
                             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-                            done_map[wid] = row
+                            done_map[uk] = row
                         fh.flush()
                     prev = progress_counter["count"]
                     progress_counter["count"] += len(ok_map)
@@ -1104,25 +1527,38 @@ def translate_job(
         failures_path.unlink()
 
     # Re-load checkpoint cleanly and expand in exact original record order
-    final_done = _load_checkpoint(ckpt_path)
+    final_done, _ = _load_checkpoint(ckpt_path, legacy_wid_to_key=legacy_wid_to_key)
     missing_ids: list[str] = []
     cn_rows: list[dict[str, Any]] = []
     tw_rows: list[dict[str, Any]] = []
     zh_cn_texts: list[str] = []
     zh_tw_texts: list[str] = []
+    no_cjk_count = 0
+    latin_only_count = 0
+    repaired_units: set[str] = set()
 
     for rec in records:
         rid = rec["id"]
-        if rid in passthrough_cn:
+        if rid in override_cn:
+            cn_val = override_cn[rid]
+        elif rid in passthrough_cn:
             cn_val = passthrough_cn[rid]
         else:
-            wid = rec_to_wid[rid]
-            entry = final_done.get(wid)
+            uk = rec_to_unit_key[rid]
+            entry = final_done.get(uk)
             if not entry:
                 missing_ids.append(rid)
                 cn_val = ""
             else:
                 cn_val = entry["zh_cn"]
+                flags_list = entry.get("flags") or []
+                if any(str(fl).startswith(REPAIR_FLAG_PREFIXES) for fl in flags_list):
+                    repaired_units.add(uk)
+                lang_errs = check_language_qa(rec["text"], cn_val)
+                if "no_cjk" in lang_errs:
+                    no_cjk_count += 1
+                if "latin_only" in lang_errs:
+                    latin_only_count += 1
         tw_val = to_traditional(cn_val, mode=tw_mode) if cn_val else ""
         if cn_val:
             zh_cn_texts.append(cn_val)
@@ -1148,8 +1584,12 @@ def translate_job(
         "total_records": len(records),
         "unique_work_units": len(work_units),
         "passthrough_records": len(passthrough_cn),
+        "manual_overrides": len(override_cn),
+        "repaired": len(repaired_units),
         "missing": len(missing_ids),
         "failures": len(all_failures),
+        "no_cjk": no_cjk_count,
+        "latin_only": latin_only_count,
         "tw_mode": tw_mode,
         "roundtrip_mismatches": roundtrip_mismatches,
         "watch_chars": schema.count_watch_chars(zh_cn_texts, zh_tw_texts),
@@ -1168,14 +1608,14 @@ def translate_job(
     )
     schema.atomic_write_json(qa_out, qa_summary)
 
-    if not missing_ids and not all_failures:
+    if not missing_ids and not all_failures and no_cjk_count == 0 and latin_only_count == 0:
         marker = schema.build_done_marker(job, [cn_out, tw_out, qa_out], qa_summary)
         schema.atomic_write_json(schema.done_marker_path(output_dir, job), marker)
         print(f"[job] {job}: COMPLETE 100% ({len(records)}/{len(records)}) -> {tw_out.name}")
     else:
         print(
-            f"[job] {job}: INCOMPLETE missing={len(missing_ids)} failures={len(all_failures)}; "
-            "DONE marker NOT written"
+            f"[job] {job}: INCOMPLETE missing={len(missing_ids)} failures={len(all_failures)} "
+            f"no_cjk={no_cjk_count} latin_only={latin_only_count}; DONE marker NOT written"
         )
     return qa_summary
 
@@ -1186,6 +1626,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--api-base", help="Use an already-running OpenAI-compatible /v1 endpoint")
     ap.add_argument("--tw-mode", default="s2t", choices=("s2t", "s2twp"))
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--repair-only", action="store_true", help="Resume from checkpoint and repair remaining units only")
+    ap.add_argument("--job", help="Run only the named job (<job>.jsonl)")
+    ap.add_argument("--overrides", help="Optional path to overrides JSONL file")
     ap.add_argument("--skip-gpu-check", action="store_true")
     ap.add_argument("--manifest-wait", type=float, default=60.0)
     ap.add_argument("--min-tps", type=float, default=DEFAULT_MIN_TPS)
@@ -1200,13 +1643,13 @@ def main(argv: list[str] | None = None) -> int:
     work_dir = dirs["sakura_work"]
     output_dir = dirs["sakura_output"]
 
-    # Strict check: reject non-.jsonl/.manifest.json files inside input_dir (ignore OS metadata)
+    # Strict check: reject non-.jsonl/.manifest.json/.overrides.jsonl files inside input_dir (ignore OS metadata)
     for p in sorted(input_dir.iterdir()):
         if not p.is_file():
             continue
         if p.name.startswith(".") or p.name.lower() == "desktop.ini":
             continue
-        if p.name.endswith(".manifest.json"):
+        if p.name.endswith(".manifest.json") or p.name.endswith(".overrides.jsonl"):
             continue
         if p.suffix.lower() != ".jsonl":
             raise schema.SchemaError(
@@ -1216,11 +1659,22 @@ def main(argv: list[str] | None = None) -> int:
     job_files = sorted(
         p
         for p in input_dir.iterdir()
-        if p.is_file() and not p.name.startswith(".") and p.suffix.lower() == ".jsonl"
+        if p.is_file()
+        and not p.name.startswith(".")
+        and p.suffix.lower() == ".jsonl"
+        and not p.name.endswith(".overrides.jsonl")
     )
+    if args.job:
+        target_name = schema.validate_job_name(args.job)
+        job_files = [p for p in job_files if p.stem == target_name]
+        if not job_files:
+            raise FileNotFoundError(f"Requested --job {target_name!r} not found in {input_dir}")
+
     if not job_files:
         print(f"[runner] No .jsonl jobs found in {input_dir}")
         return 0
+
+    overrides_path = Path(args.overrides) if args.overrides else None
 
     # Pre-validate ALL jobs and optional glossary before touching GPU/server
     glossary_path = dirs["root"] / schema.SUBDIR / "glossary.json"
@@ -1270,8 +1724,15 @@ def main(argv: list[str] | None = None) -> int:
                 force=args.force,
                 manifest_wait=args.manifest_wait,
                 skip_gpu_check=args.skip_gpu_check,
+                overrides_path=overrides_path,
+                repair_only=args.repair_only,
             )
-            if summary.get("failures", 0) or summary.get("missing", 0):
+            if (
+                summary.get("failures", 0)
+                or summary.get("missing", 0)
+                or summary.get("no_cjk", 0)
+                or summary.get("latin_only", 0)
+            ):
                 had_failures = True
         return 1 if had_failures else 0
     finally:

@@ -475,6 +475,9 @@ class SakuraColabTests(unittest.TestCase):
                 self.assertNotIn("REBUILD_LLAMA_BIN", full_src)
                 self.assertNotIn("--rebuild-bin", full_src)
                 self.assertIn("DISCONNECT_ON_ERROR = False", full_src)
+                self.assertIn("IDLE_UNASSIGN_MINUTES", full_src)
+                self.assertIn("REPAIR_ONLY", full_src)
+                self.assertIn("STOP THE RUNTIME NOW", full_src)
             bridge_src = (HERE / "drive_bridge.py").read_text(encoding="utf-8")
             self.assertNotIn("copy2", bridge_src)
             for c in code_cells:
@@ -485,6 +488,397 @@ class SakuraColabTests(unittest.TestCase):
                 ast.parse(cleaned, filename=nb_name)
                 if nb_name == "sakura_colab.ipynb" and "Popen" in src:
                     self.assertIn("runner.log", src)
+
+    def test_quote_repair_fixtures(self):
+        # 1) Asymmetric open-only / close-only split quotes
+        q_open, fl_open = runner.repair_quotes("「今日は", "「今天天气真好」")
+        self.assertEqual(q_open, "「今天天气真好")
+        self.assertIn("trim_close_quote", fl_open)
+        self.assertEqual(runner.validate_unit_translation("「今日は", q_open), [])
+
+        q_close, fl_close = runner.repair_quotes("ありがとう」", "「谢谢你」")
+        self.assertEqual(q_close, "谢谢你」")
+        self.assertIn("trim_open_quote", fl_close)
+        self.assertEqual(runner.validate_unit_translation("ありがとう」", q_close), [])
+
+        # 2) Full pair in source, zero in output -> wrap outer pair
+        q_pair, fl_pair = runner.repair_quotes("「おはよう」", "早安")
+        self.assertEqual(q_pair, "「早安」")
+        self.assertIn("add_quote_pair", fl_pair)
+
+        # 3) Duplicated outer quotes -> trim extras
+        q_dup, fl_dup = runner.repair_quotes("「大丈夫？」", "「「没问题？」」")
+        self.assertEqual(q_dup, "「没问题？」")
+        self.assertIn("trim_dup_open_quote", fl_dup)
+
+        # 4) Half-width corner quotes and curly/ASCII quotes converted cleanly
+        q_hw, fl_hw = runner.repair_quotes("第1章「勇者の剣」を開始しますか？", "要开始第1章｢勇者之剑｣吗？")
+        self.assertEqual(q_hw, "要开始第1章「勇者之剑」吗？")
+        self.assertIn("repair_halfwidth_quotes", fl_hw)
+
+        q_curly, fl_curly = runner.repair_quotes("第1章「勇者の剣」を開始しますか？", "要开始第1章“勇者之剑”吗？")
+        self.assertEqual(q_curly, "要开始第1章「勇者之剑」吗？")
+        self.assertIn("repair_curly_quotes", fl_curly)
+
+        # 5) Inner unfixable quote asymmetry still caught cleanly
+        self.assertIn(
+            "quote_asymmetry_mismatch",
+            runner.validate_unit_translation("小説。「一言」と話す。", "小说。这么说着。"),
+        )
+
+    def test_kana_glossary_and_overrides(self):
+        # Glossary substitution on residual kana & overrides.jsonl pass-through without GPU
+        gl = [
+            {"src": "ハニー", "dst": "哈尼", "note": ""},
+            {"src": "イフリート", "dst": "伊弗利特", "note": ""},
+            {"src": "ノーム", "dst": "诺姆", "note": ""},
+            {"src": "バンソコ", "dst": "创可贴", "note": ""},
+        ]
+        u = {"kind": "dialogue", "speaker": "ユイ", "text": "イフリートだよ！"}
+        cn, _, flags = runner.normalize_output_line("这是イフリート哦！", u, ["ユイ"], matched_glossary=gl)
+        self.assertEqual(cn, "这是伊弗利特哦！")
+        self.assertIn("glossary_subst", flags)
+        self.assertEqual(runner.validate_unit_translation(u["text"], cn), [])
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            drive_root = root / "drive" / schema.DRIVE_ROOT_NAME
+            dirs = schema.ensure_drive_tree(drive_root)
+            rows = [
+                {"id": "k1", "file": "f1", "kind": "ui", "text": "ハニー"},
+                {"id": "k2", "file": "f1", "kind": "ui", "text": "バンソコ"},
+            ]
+            inp = dirs["sakura_input"] / "kana_job.jsonl"
+            inp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+            schema.atomic_write_json(
+                schema.manifest_path_for(inp),
+                schema.build_manifest("kana_job", inp, len(rows)),
+            )
+            ov = dirs["sakura_input"] / "kana_job.overrides.jsonl"
+            ov.write_text(
+                json.dumps({"id": "k1", "translation": "哈尼"}, ensure_ascii=False) + "\n"
+                + json.dumps({"kind": "ui", "text": "バンソコ", "translation": "創可貼"}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            # All resolved via overrides -> zero HTTP/GPU calls needed
+            rc = runner.main(
+                ["--drive-root", str(drive_root), "--api-base", "http://127.0.0.1:9/v1",
+                 "--skip-gpu-check", "--manifest-wait", "0"]
+            )
+            self.assertEqual(rc, 0)
+            marker = schema.verify_done_marker(dirs["sakura_output"], "kana_job")
+            self.assertEqual(marker["qa_summary"]["manual_overrides"], 2)
+            self.assertEqual(marker["qa_summary"]["unique_work_units"], 0)
+
+    def test_placeholder_repair_and_failure_record(self):
+        # Encoding {{TAG_0}} -> ⟦0⟧ and decoding spaced ⟦ 0 ⟧ back to {{TAG_0}}
+        enc, tokens = runner.encode_placeholders("{{TAG_0}}の{{TAG_1}}を {{TAG_2}} 奪った！")
+        self.assertEqual(enc, "⟦0⟧の⟦1⟧を ⟦2⟧ 奪った！")
+        self.assertEqual(tokens, ["{{TAG_0}}", "{{TAG_1}}", "{{TAG_2}}"])
+        dec, pflags = runner.decode_placeholders("夺走了⟦ 0 ⟧的⟦1⟧共⟦2⟧！", tokens)
+        self.assertEqual(dec, "夺走了{{TAG_0}}的{{TAG_1}}共{{TAG_2}}！")
+        self.assertIn("repair_placeholder", pflags)
+
+        # Dropped/reordered placeholder triggers targeted retry, then writes actionable failure record
+        attempts_log: list[str] = []
+
+        class PhHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                return
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                req_obj = json.loads(self.rfile.read(length).decode("utf-8"))
+                attempts_log.append(req_obj["messages"][0]["content"])
+                user_msg = req_obj["messages"][-1]["content"]
+                marker = "将下面的文本从日文翻译成简体中文："
+                src_block = user_msg.split(marker, 1)[1][1:].strip()
+                # Succeed for good_unit, always drop ⟦0⟧ for bad_unit
+                reply = "恢复成功！" if "テスト" in src_block else "怪物出现了！"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                ev = json.dumps({"choices": [{"delta": {"content": reply}}]}, ensure_ascii=False)
+                self.wfile.write(f"data: {ev}\n\n".encode("utf-8"))
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+
+        srv = _ThreadedHTTPServer(("127.0.0.1", 0), PhHandler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                drive_root = root / "drive" / schema.DRIVE_ROOT_NAME
+                dirs = schema.ensure_drive_tree(drive_root)
+                rows = [{"id": "p1", "file": "sys", "kind": "system", "text": "{{TAG_0}}が出現！"}]
+                inp = dirs["sakura_input"] / "ph_job.jsonl"
+                inp.write_text(json.dumps(rows[0], ensure_ascii=False) + "\n", encoding="utf-8")
+                schema.atomic_write_json(
+                    schema.manifest_path_for(inp),
+                    schema.build_manifest("ph_job", inp, 1),
+                )
+                rc = runner.main(
+                    ["--drive-root", str(drive_root), "--api-base", f"http://127.0.0.1:{port}/v1",
+                     "--skip-gpu-check", "--manifest-wait", "0"]
+                )
+                self.assertEqual(rc, 1)
+                self.assertEqual(len(attempts_log), 3)
+                self.assertIn("占位符", attempts_log[1])
+                fails = [
+                    json.loads(ln)
+                    for ln in (dirs["sakura_work"] / "ph_job.failures.jsonl").read_text("utf-8").splitlines()
+                    if ln.strip()
+                ]
+                self.assertEqual(len(fails), 1)
+                f0 = fails[0]
+                self.assertEqual(f0["attempts"], 3)
+                self.assertEqual(f0["expected_placeholders"], ["{{TAG_0}}"])
+                self.assertEqual(f0["observed_placeholders"], [])
+                self.assertEqual(f0["source_kind"], "system")
+                self.assertTrue(f0["suggested_fix"])
+                self.assertEqual(len(f0["unit_key"]), 40)
+                self.assertFalse(schema.done_marker_path(dirs["sakura_output"], "ph_job").is_file())
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_multiline_segment_split_rejoin(self):
+        seen_prompts: list[str] = []
+        fail_seg2_once = [True]
+
+        class MlHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                return
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                req_obj = json.loads(self.rfile.read(length).decode("utf-8"))
+                user_msg = req_obj["messages"][-1]["content"]
+                src_block = user_msg.split("将下面的文本从日文翻译成简体中文：", 1)[1][1:].strip()
+                seen_prompts.append(src_block)
+                # Return two lines once on seg2 to verify segment retry!
+                if "薬" in src_block and fail_seg2_once[0]:
+                    fail_seg2_once[0] = False
+                    reply = "第一行\n第二行"
+                elif "冒険" in src_block:
+                    reply = "冒险中受伤了！这种时候就用特制"
+                else:
+                    reply = "速效治疗药！立刻见效！"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                ev = json.dumps({"choices": [{"delta": {"content": reply}}]}, ensure_ascii=False)
+                self.wfile.write(f"data: {ev}\n\n".encode("utf-8"))
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+
+        srv = _ThreadedHTTPServer(("127.0.0.1", 0), MlHandler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            u = {
+                "unit_key": runner.make_unit_key("system", None, "冒険中に負傷した！\n薬で回復！"),
+                "wid": "w000001",
+                "file": "item",
+                "kind": "system",
+                "speaker": None,
+                "text": "冒険中に負傷した！\n薬で回復！",
+            }
+            cn, _, _, fail = runner._translate_single_multiline(
+                f"http://127.0.0.1:{port}/v1", u, [], [], []
+            )
+            self.assertIsNone(fail)
+            self.assertEqual(cn, "冒险中受伤了！这种时候就用特制\n速效治疗药！立刻见效！")
+            # Must never send multi-line segment in one prompt
+            self.assertTrue(all("\n" not in p for p in seen_prompts))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_language_qa_no_cjk_and_allowlist(self):
+        # Must fail no_cjk + latin_only
+        self.assertEqual(runner.check_language_qa("ニューゲーム", "New Game"), ["no_cjk", "latin_only"])
+        self.assertEqual(runner.check_language_qa("「……サンクス！」", "「……Thanks！」"), ["no_cjk", "latin_only"])
+        # Lost body leaving only punctuation/whitespace must fail no_cjk
+        self.assertEqual(runner.check_language_qa("\u3000呼んでいるんだい？」", "\u3000」"), ["no_cjk"])
+        # Command example preserving verbatim ASCII tokens in source is allowlisted
+        self.assertEqual(
+            runner.check_language_qa("例：「CmdChat StartState 4 1」", "「CmdChat StartState 4 1」"),
+            [],
+        )
+
+    def test_stable_unit_key_identity_and_legacy_migration(self):
+        state = _MockState(fail_batch_once=False)
+        srv = _ThreadedHTTPServer(("127.0.0.1", 0), _make_handler(state))
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            api_base = f"http://127.0.0.1:{port}/v1"
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                drive_root = root / "drive" / schema.DRIVE_ROOT_NAME
+                dirs = schema.ensure_drive_tree(drive_root)
+                rows = [
+                    {"id": f"r{i:02d}", "file": "ch01", "kind": "narration", "text": f"文テスト_{i}"}
+                    for i in range(10)
+                ]
+                # Pre-populate checkpoint with 8 units using unit_key (0..7)
+                ckpt = dirs["sakura_work"] / "stable_job.checkpoint.jsonl"
+                ckpt_rows = []
+                for i in range(8):
+                    uk = runner.make_unit_key("narration", None, rows[i]["text"])
+                    ckpt_rows.append(
+                        json.dumps({"unit_key": uk, "wid": f"w{i+1:06d}", "zh_cn": f"哨兵译文_{i}"}, ensure_ascii=False)
+                    )
+                ckpt.write_text("\n".join(ckpt_rows) + "\n", encoding="utf-8")
+
+                # Now add an override on r00 (shifting sequential wid for r01..r09!)
+                rows[0]["override"] = "手動上書き"
+                inp = dirs["sakura_input"] / "stable_job.jsonl"
+                inp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+                schema.atomic_write_json(
+                    schema.manifest_path_for(inp),
+                    schema.build_manifest("stable_job", inp, len(rows)),
+                )
+
+                rc = runner.main(
+                    ["--drive-root", str(drive_root), "--api-base", api_base,
+                     "--skip-gpu-check", "--manifest-wait", "0", "--force"]
+                )
+                self.assertEqual(rc, 0)
+                # Only 2 missing units (r08, r09) should have been translated (1 batch call)!
+                self.assertEqual(state.calls, 1)
+                tw_rows = [
+                    json.loads(ln)
+                    for ln in (dirs["sakura_output"] / "stable_job.zh_TW.jsonl").read_text("utf-8").splitlines()
+                    if ln.strip()
+                ]
+                self.assertEqual([r["id"] for r in tw_rows], [r["id"] for r in rows])
+                self.assertEqual(tw_rows[0]["translation"], "手動上書き")
+                for i in range(1, 8):
+                    self.assertEqual(tw_rows[i]["translation"], f"哨兵譯文_{i}")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_repair_only_mode_2215_cached_20_todo(self):
+        state = _MockState(fail_batch_once=False)
+        srv = _ThreadedHTTPServer(("127.0.0.1", 0), _make_handler(state))
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                drive_root = root / "drive" / schema.DRIVE_ROOT_NAME
+                dirs = schema.ensure_drive_tree(drive_root)
+                rows = [
+                    {"id": f"id_{i:05d}", "file": "main", "kind": "narration", "text": f"台詞テスト_{i}"}
+                    for i in range(2235)
+                ]
+                # Legacy wid-only checkpoint for first 2215 units
+                ckpt = dirs["sakura_work"] / "repair_fixture.checkpoint.jsonl"
+                ckpt.write_text(
+                    "".join(
+                        json.dumps({"wid": f"w{i+1:06d}", "zh_cn": f"保留译文_{i}"}, ensure_ascii=False) + "\n"
+                        for i in range(2215)
+                    ),
+                    encoding="utf-8",
+                )
+                inp = dirs["sakura_input"] / "repair_fixture.jsonl"
+                inp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+                schema.atomic_write_json(
+                    schema.manifest_path_for(inp),
+                    schema.build_manifest("repair_fixture", inp, len(rows)),
+                )
+
+                buf = io.StringIO()
+                with mock.patch("sys.stdout", buf):
+                    rc = runner.main(
+                        ["--drive-root", str(drive_root), "--api-base", f"http://127.0.0.1:{port}/v1",
+                         "--repair-only", "--job", "repair_fixture",
+                         "--skip-gpu-check", "--manifest-wait", "0"]
+                    )
+                self.assertEqual(rc, 0)
+                out_log = buf.getvalue()
+                self.assertIn("cached=2215 | todo=20", out_log)
+                marker = schema.verify_done_marker(dirs["sakura_output"], "repair_fixture")
+                self.assertEqual(marker["qa_summary"]["total_records"], 2235)
+                self.assertEqual(marker["qa_summary"]["failures"], 0)
+                cn_rows = [
+                    json.loads(ln)
+                    for ln in (dirs["sakura_output"] / "repair_fixture.zh_CN.jsonl").read_text("utf-8").splitlines()
+                    if ln.strip()
+                ]
+                self.assertEqual(len(cn_rows), 2235)
+                for i in range(2215):
+                    self.assertEqual(cn_rows[i]["translation"], f"保留译文_{i}")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_done_gate_blocks_on_failures_or_no_cjk(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            drive_root = root / "drive" / schema.DRIVE_ROOT_NAME
+            dirs = schema.ensure_drive_tree(drive_root)
+            rows = [{"id": "d1", "file": "f1", "kind": "system", "text": "ニューゲーム"}]
+            inp = dirs["sakura_input"] / "bad_lang.jsonl"
+            inp.write_text(json.dumps(rows[0], ensure_ascii=False) + "\n", encoding="utf-8")
+            schema.atomic_write_json(
+                schema.manifest_path_for(inp),
+                schema.build_manifest("bad_lang", inp, 1),
+            )
+            # Legacy checkpoint containing un-translated English output
+            ckpt = dirs["sakura_work"] / "bad_lang.checkpoint.jsonl"
+            ckpt.write_text(json.dumps({"wid": "w000001", "zh_cn": "New Game"}) + "\n", encoding="utf-8")
+
+            rc = runner.main(
+                ["--drive-root", str(drive_root), "--api-base", "http://127.0.0.1:9/v1",
+                 "--repair-only", "--job", "bad_lang", "--skip-gpu-check", "--manifest-wait", "0"]
+            )
+            self.assertEqual(rc, 1)
+            self.assertFalse(schema.done_marker_path(dirs["sakura_output"], "bad_lang").is_file())
+            qa = json.loads((dirs["sakura_output"] / "bad_lang.qa_report.json").read_text("utf-8"))
+            self.assertEqual(qa["no_cjk"], 1)
+            self.assertEqual(qa["latin_only"], 1)
+
+    def test_no_duplicate_or_lost_ids(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            drive_root = root / "drive" / schema.DRIVE_ROOT_NAME
+            dirs = schema.ensure_drive_tree(drive_root)
+            rows = [
+                {"id": "a1", "file": "f1", "kind": "narration", "text": "テストA"},
+                {"id": "a2", "file": "f1", "kind": "narration", "text": "テストA"},  # duplicate text, distinct id
+                {"id": "a3", "file": "f1", "kind": "ui", "text": "B", "override": "乙"},
+            ]
+            ckpt = dirs["sakura_work"] / "id_job.checkpoint.jsonl"
+            uk = runner.make_unit_key("narration", None, "テストA")
+            ckpt.write_text(json.dumps({"unit_key": uk, "wid": "w000001", "zh_cn": "测试A"}) + "\n", encoding="utf-8")
+            inp = dirs["sakura_input"] / "id_job.jsonl"
+            inp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+            schema.atomic_write_json(
+                schema.manifest_path_for(inp),
+                schema.build_manifest("id_job", inp, len(rows)),
+            )
+            rc = runner.main(
+                ["--drive-root", str(drive_root), "--api-base", "http://127.0.0.1:9/v1",
+                 "--repair-only", "--skip-gpu-check", "--manifest-wait", "0"]
+            )
+            self.assertEqual(rc, 0)
+            tw_rows = [
+                json.loads(ln)
+                for ln in (dirs["sakura_output"] / "id_job.zh_TW.jsonl").read_text("utf-8").splitlines()
+                if ln.strip()
+            ]
+            out_ids = [r["id"] for r in tw_rows]
+            self.assertEqual(out_ids, ["a1", "a2", "a3"])
+            self.assertEqual(len(set(out_ids)), len(out_ids))
 
 
 if __name__ == "__main__":
