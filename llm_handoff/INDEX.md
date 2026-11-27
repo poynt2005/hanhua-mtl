@@ -27,8 +27,8 @@ agent needs to continue seamlessly from the current state.
 | 14 | `14_thrashing_postmortem.md` | **read before changing anything**: how this project repeatedly broke its own fixes, every regression, the anti-patterns, and the loop that works instead |
 | 15 | `15_run_log.md` | **the full session, attempt by attempt**: every wrong diagnosis and its cost, the batch, the model upgrade, the detection over-call, the infrastructure failures, and the final state |
 | 19 | `19_galgame_image_branches.md` | **the galgame side branches** (`sakura-ollama`, `hymt2-heretic`): what each image is, the hymt2 decision record, CI trigger rules, and the checklist for its first GPU run |
-| 20 | `20_hymt2_colab_workflow.md` | **this branch (`hymt2-heretic-colab`)**: Google Colab L4 + Google Drive 5TB zero-compile EN->ZH adult galgame workflow, free CPU GGUF/binary deployer, strict AI refusal guard, bounded idle timer, Option A `drive_bridge.py`, and first-boot L4 VRAM runbook |
-| 21 | `21_colab_session_postmortem.md` | **full Colab session context & postmortem**: C1-C11 pitfalls, 9-item operator accountability log, code review fixes F1-F7, C10/C11 production hardening, 8 permanent guardrails & verified runtime facts |
+| 20 | `20_hymt2_colab_workflow.md` | **this branch (`hymt2-heretic-colab`)**: Google Colab L4 + Google Drive 5TB zero-compile EN->ZH adult galgame workflow, free CPU GGUF/binary deployer, strict AI refusal guard, Option A `EXIT_OK`/`EXIT_PARTIAL`/`EXIT_FATAL` split + FUSE retry, `drive_bridge.py`, and first-boot L4 VRAM runbook |
+| 21 | `21_colab_session_postmortem.md` | **full Colab session context & postmortem**: C1-C12 pitfalls, 10-item operator accountability log, code review fixes F1-F11, C10/C11/Option-A hardening, 9 permanent guardrails & verified runtime facts |
 
 > This copy of `llm_handoff/` is on the `hymt2-heretic-colab` side branch and is
 > **stale** apart from docs `19`, `20`, and `21`: `master` holds `16`-`18` and the

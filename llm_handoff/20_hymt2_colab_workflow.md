@@ -1,11 +1,11 @@
 # 20 — Hy-MT2 Colab Workflow (`hymt2-heretic-colab`)
 
 > **Branch:** `hymt2-heretic-colab` (branched from `origin/hymt2-heretic` at `b10f481`)
-> **Updated:** 2026-11-28 01:06 +08:00
+> **Updated:** 2026-11-28 01:32 +08:00
 > **Agent:** Antigravity
 > **Model:** Gemini 4 Neon
-> **Status:** READY — Milestone 10 complete (zero-compile prebuilt bundle, `DISCONNECT_ON_ERROR=False` + `IDLE_UNASSIGN_MINUTES=15` safeguard, Gate 4 `-lv 4` + 5s async flush poll, plain-template preflight fallback, batched checkpoints, and C11 separated `_GATE_REFUSAL_RE` vs strict AI-boilerplate `_REFUSAL_RE`; 6/6 offline tests & sanitization passed; live L4 GPU boot still `not tested`)
-> **Session Postmortem & Full Context:** See [21_colab_session_postmortem.md](21_colab_session_postmortem.md) for the complete C1–C11 failure table, 9-item operator accountability log, F1–F7 review fixes, 8 permanent guardrails, and live Colab L4 specs.
+> **Status:** READY — Milestone 11 complete (Option A exit-code separation `0/1/2`, mid-run `llama-server` crash guard, 5x Drive FUSE checkpoint write retry, `gpu.log` resilience, `DISCONNECT_ON_ERROR=False` + `IDLE_UNASSIGN_MINUTES=15`, Gate 4 `-lv 4` + 5s async flush poll, plain-template preflight fallback, C11 separated `_GATE_REFUSAL_RE` vs strict AI-boilerplate `_REFUSAL_RE`; 10/10 offline tests & sanitization passed; live L4 GPU boot still `not tested`)
+> **Session Postmortem & Full Context:** See [21_colab_session_postmortem.md](21_colab_session_postmortem.md) for the complete C1–C12 failure table, 10-item operator accountability log, F1–F11 review fixes, 9 permanent guardrails, and live Colab L4 specs.
 
 ---
 
@@ -48,8 +48,12 @@ Provide a zero-compile **Google Colab L4 (24 GB) + Google Drive (5 TB) one-click
 - **Gate 4 (`run_preflight_gate`)**: Runs both `mechanical_problems()` and broad `_GATE_REFUSAL_RE` (`抱歉|無法|无法|不能提供|I can't|I cannot|I'm sorry|as an AI`), matching `origin/hymt2-heretic:deploy/hymt2-heretic/hymt2_prompt.py`, plus plain-template fallback (F3).
 - **Normal Dialogue (`mechanical_problems`)**: Uses strict AI-boilerplate `_REFUSAL_RE` (`as an AI`, `I cannot fulfill/assist/translate this`, `I'm sorry, I can't/cannot`, `不能提供相关/色情/成人`, policy citation patterns) so ordinary translated dialogue such as `"抱歉，我无法停下来。"` is never falsely flagged as a refusal.
 
-### 2.3 Notebook Lifecycle & First-Boot L4 VRAM Note
-- **Notebook defaults:** `AUTO_DISCONNECT=True`, `DISCONNECT_ON_ERROR=False`, `IDLE_UNASSIGN_MINUTES=15`, `TW_CONVERT_MODE="s2twp"`. On error with `DISCONNECT_ON_ERROR=False`, Drive flushes first, prints `STOP THE RUNTIME NOW` + idle cost warning (~2 compute units/hr), and waits `IDLE_UNASSIGN_MINUTES` (interruptible via KeyboardInterrupt) before auto-unassigning.
+### 2.3 Option A Exit Codes, FUSE Resilience, Notebook Lifecycle & First-Boot L4 VRAM Note
+- **Three-tier exit codes (`runner.py` + `hymt2_colab.ipynb`):**
+  - `EXIT_OK = 0`: All jobs passed 100%, `.DONE.json` written -> `[DONE]` -> `AUTO_DISCONNECT=True` unassigns L4.
+  - `EXIT_PARTIAL = 2`: All units completed while `llama-server` stayed healthy (`proc.poll() is None`), outputs + `checkpoint.jsonl` + `failures.jsonl` saved to Drive, `.DONE.json` NOT written -> notebook prints calm `[PARTIAL]` summary (no `RuntimeError`), flushes Drive, and disconnects under `AUTO_DISCONNECT=True` (no 15-min idle burn).
+  - `EXIT_FATAL = 1`: Startup Gates 0-4, invalid inputs/manifest, persistent checkpoint FUSE error, or mid-run `llama-server` exit (`proc.poll() is not None`) -> raises/returns fatal error, `DISCONNECT_ON_ERROR=False` prints `STOP THE RUNTIME NOW` and retains L4 up to `IDLE_UNASSIGN_MINUTES=15`.
+- **Drive FUSE resilience:** `_append_checkpoint_rows` retries transient `OSError` up to `5` times (`0.25s` exponential backoff) inside `_flush_pending` before updating `done_map` / `progress_counter`; `_log_gpu_progress` isolates `gpu.log` `OSError` as a non-fatal warning.
 - **L4 VRAM headroom warning (`not tested` live):** Observed Colab L4 free VRAM before model load was `22,369 MiB` during Sakura Run #4, and `llama.cpp` `b12019` defaults `-fit on` (targeting `>= 1,024 MiB` free device memory). At `CTX_SIZE = 32768`, `Hy-MT2-30B-A3B` weights (~17.0 GiB) + KV cache (~3.0 GiB) + compute buffers project to `~20.8-21.2 GiB` — very close to the `-fit on` threshold. On the first live L4 boot, inspect `hymt2/work/llama.log` (`common_params_fit_impl` lines); if `-fit on` spills layers to CPU and fails Gate 2, lowering `CTX_SIZE` from `32768` to `16384` (4,096/slot, still ample for 1-line requests) frees ~1.5 GiB immediately.
 
 ---
@@ -68,6 +72,7 @@ Provide a zero-compile **Google Colab L4 (24 GB) + Google Drive (5 TB) one-click
 | 2026-11-26 14:32 | Milestone 8: Parity Sync from Sakura C9 (`DISCONNECT_ON_ERROR = False` & Clean `-lv 4`) | Done | Removed redundant `LLAMA_ARG_LOG_VERBOSITY=4` env var (keeping `-lv 4`), defaulted `DISCONNECT_ON_ERROR = False`, updated `test_all.py` assertions |
 | 2026-11-28 00:52 | Milestone 9: Port `IDLE_UNASSIGN_MINUTES=15` Safeguard & Sync Postmortem C10 | Done | Added `IDLE_UNASSIGN_MINUTES = 15` bounded countdown and `STOP THE RUNTIME NOW` banner after Drive flush in `hymt2_colab.ipynb`; synced `21_colab_session_postmortem.md` |
 | 2026-11-28 01:02 | Milestone 10: Narrow `_REFUSAL_RE` in `mechanical_problems()` to Prevent Dialogue False Positives (C11) | Done | Separated `_GATE_REFUSAL_RE` (Gate 4 only) from strict AI-boilerplate `_REFUSAL_RE` in `mechanical_problems()`, preventing normal English->Chinese dialogue (`"抱歉，我无法……"`) from being falsely flagged as refusals; synced `runner.py` to Drive `scripts/hymt2/` |
+| 2026-11-28 01:32 | Milestone 11: Option A Exit-Code Separation (`0/1/2`) & FUSE I/O Resilience (C12) | Done | Separated `EXIT_OK = 0`, `EXIT_FATAL = 1`, `EXIT_PARTIAL = 2` so completed runs with minor failures save all outputs, skip `.DONE.json`, print calm `[PARTIAL]` summary in `hymt2_colab.ipynb` (no `RuntimeError`), and still honor `AUTO_DISCONNECT=True`; added `proc.poll() is not None` mid-run server crash guard, 5-attempt exponential-backoff `_append_checkpoint_rows` (committing `done_map` post-write), and `gpu.log` `OSError` warning isolation; added 4 tests (`10/10` pass) |
 
 ---
 
@@ -75,8 +80,8 @@ Provide a zero-compile **Google Colab L4 (24 GB) + Google Drive (5 TB) one-click
 
 | Check | State | Notes |
 |---|---|---|
-| `py_compile` on `schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py` | `done` (pass) | Executed after Milestone 10 edit |
-| Offline `test_all.py` (schema, `tw2sp`/`s2twp`, whole-word glossary, personalization + plain fallback, strict refusal vs normal dialogue non-false-positive, `ui` empty-style/context, deduplication, resume, watch-chars, zero-compile prebuilt bundle + SHA-256 verification + zero `cmake`/`--rebuild-bin` assertions + `-lv 4` assertion, OS metadata ignore, `drive_bridge.py`, `.ipynb` JSON + `ast.parse` + `runner.log` + `DISCONNECT_ON_ERROR = False` + `IDLE_UNASSIGN_MINUTES`) | `done` (6/6 pass) | Executed after Milestone 10 edit using local mock SSE & HTTP servers and temp dirs |
+| `py_compile` on `schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py` | `done` (pass) | Executed after Milestone 11 edit |
+| Offline `test_all.py` (10 tests: schema, `tw2sp`/`s2twp`, whole-word glossary, personalization + plain fallback, strict refusal vs normal dialogue non-false-positive, `ui` empty-style/context, deduplication, resume, watch-chars, zero-compile prebuilt bundle + SHA-256 verification + zero `cmake`/`--rebuild-bin` assertions + `-lv 4` assertion, OS metadata ignore, `drive_bridge.py`, `.ipynb` JSON + `ast.parse` + `runner.log` + `[PARTIAL]` + disconnect matrix, `EXIT_PARTIAL=2`, Drive FUSE retry & `gpu.log` resilience, mid-run server crash `EXIT_FATAL`) | `done` (10/10 pass) | Executed after Milestone 11 edit using local mock SSE & HTTP servers and temp dirs |
 | Code review, sanitization audit & Drive `scripts/hymt2/runner.py` SHA-256 sync | `done` (0 hits) | Verified zero secrets, zero local usernames/paths, zero copyrighted game strings, zero Docker CI triggers |
 | Live Google Colab L4 GPU run (`hy_v3` load, `-fit on` VRAM margin, English refusal rate, H-scene quality, `s2twp` spot check) | `not tested` | Requires operator live Colab L4 run (`deploy_models_colab.ipynb` with `DEPLOY_HYMT2=True` then `hymt2_colab.ipynb`) |
 

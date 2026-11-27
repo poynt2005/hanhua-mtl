@@ -79,7 +79,7 @@ python deploy/colab-hymt2/drive_bridge.py push --input work/job.jsonl --glossary
 1. 檢查 `.manifest.json` SHA-256（最多輪詢等待 60 秒讓 DriveAPP 同步完）。
 2. 從 Drive `bin/` 解壓預編譯 `llama-server-l4-b12019.tar.gz`（若不存在則自動從本專案 GitHub Release 秒速下載並快取，Colab 全程零編譯）→ GPU 4 道硬檢：`nvidia-smi` >= `22,000 MiB`（拒跑 T4）→ `CUDA0` 可見 → `offloaded X/X layers to GPU` → VRAM 實佔 >= `18,000 MiB` → 3 句 Gate（日常 / 露骨 / 擬聲詞，0 拒答 0 `<think>`）且速度 `>= 8.0 tok/s`。
 3. 4 路並行翻譯＋斷點續傳（每 10 句批次寫入 Drive checkpoint 並於結束/例外 `finally` 強制 flush）；機械檢查失敗會先以官方 plain 模板重試一次，仍失敗記進 `failures.jsonl`。其中寬鬆拒答關鍵字（`抱歉`/`无法`/`I'm sorry`/`I can't`）僅套用於開機 Gate 4；正式逐句翻譯使用嚴格 AI 拒答樣板檢查，避免誤殺正常英文台詞。
-4. 產出 `zh_CN.jsonl`、`zh_TW.jsonl`（`s2twp`）、`qa_report.json`、`DONE.json`；`finally` 必先 sync 日誌並 `drive.flush_and_unmount()`，成功時若 `AUTO_DISCONNECT=True` 立即 `runtime.unassign()`；失敗時預設 `DISCONNECT_ON_ERROR=False` 會印出 `STOP THE RUNTIME NOW` 並於 `IDLE_UNASSIGN_MINUTES=15` 後自動釋放 GPU 防呆（按中斷鍵可保留除錯）。
+4. 當 `missing=0`、`failures=0` 全數通過時才寫入 `output/<job>.DONE.json` 並回傳結束碼 **`0`（`EXIT_OK`）**；若全數單元已跑完、譯文／`checkpoint.jsonl`／`failures.jsonl` 均已寫入但仍有少數拒答／失敗句（且 `llama-server` 未崩潰）則**不寫 `.DONE.json`** 並回傳結束碼 **`2`（`EXIT_PARTIAL`）**，Notebook 僅印出平靜的 `[PARTIAL]` 摘要、不拋 `RuntimeError`、同步 Drive 後照 `AUTO_DISCONNECT=True` 自動釋放 L4 省點數。唯有啟動 Gate 0–4、輸入檔異常、`checkpoint.jsonl` 連續 I/O 失敗或推論中 `llama-server` 意外終止才會回傳/拋錯 **`1`（`EXIT_FATAL`）**，`finally` 先 sync 日誌並 `drive.flush_and_unmount()`，且預設 `DISCONNECT_ON_ERROR=False` 會印出 `STOP THE RUNTIME NOW` 並於 `IDLE_UNASSIGN_MINUTES=15` 後自動釋放 GPU 防呆（寫入 `checkpoint.jsonl` 具 5 次指數退避重試，`gpu.log` 寫入失敗僅警告不中斷）。
 
 ### Phase 4：狀態檢查 → 拉回驗證 → 續接寫回
 ```powershell

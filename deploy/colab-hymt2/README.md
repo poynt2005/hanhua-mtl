@@ -26,8 +26,8 @@
    python deploy/colab-hymt2/drive_bridge.py push --input work/en_game.jsonl --glossary work/glossary.json --name en_01
    ```
 2. **你打開 `hymt2_colab.ipynb`（確認選 L4 GPU）→ 按 `Ctrl+F9`：**
-   - **Notebook 重要參數：** `AUTO_DISCONNECT = True`（成功即自動釋放 GPU）；`DISCONNECT_ON_ERROR = False`（預設錯後先同步日誌並印出 `STOP THE RUNTIME NOW` 方便除錯，並以 `IDLE_UNASSIGN_MINUTES = 15` 倒數自動斷線防止持續計費）。
-   - **Colab 端完全不含任何編譯流程**，直接完成：從 Drive `bin/` 解壓預編譯 `llama-server-l4-b12019.tar.gz`（若缺失則從 GitHub Release 秒速下載並驗證 SHA-256 後寫回 Drive `bin/`）→ 模型複製到本地 SSD → **GPU 4 道硬鎖檢查**（拒跑 T4、驗證 100% 層數進 GPU、VRAM >= 18 GB、3 句 Gate >= 8 tok/s）→ 4 路並行單句翻譯（含 `STYLE_ADULT` + `tw2sp` + plain fallback + 嚴格 AI 拒答檢測不誤殺正常台詞）＋批次斷點續傳 → `s2twp` 轉台繁與 QA → 寫入 `.DONE.json` → `flush_and_unmount()` → 自動斷線釋放 L4。
+   - **Notebook 結束碼與斷線行為（方案 A）：** `rc = 0`（`[DONE]` 100% 通過並寫入 `.DONE.json` → 自動釋放 L4）；`rc = 2`（`[PARTIAL]` 全部句子皆已跑完並存檔至 `checkpoint.jsonl`/`failures.jsonl`，僅剩少數失敗句 → **不噴紅字、不寫 `.DONE.json`、同步 Drive 後直接照 `AUTO_DISCONNECT=True` 自動釋放 L4 省點數**）；`rc = 1`（僅啟動 Gate 0–4／硬體／中途 server 崩潰才會拋錯並依 `DISCONNECT_ON_ERROR = False` 保留 L4 最多 `IDLE_UNASSIGN_MINUTES = 15` 分鐘除錯）。
+   - **Colab 端完全不含任何編譯流程**，直接完成：從 Drive `bin/` 解壓預編譯 `llama-server-l4-b12019.tar.gz`（若缺失則從 GitHub Release 秒速下載並驗證 SHA-256 後寫回 Drive `bin/`）→ 模型複製到本地 SSD → **GPU 4 道硬鎖檢查**（拒跑 T4、驗證 100% 層數進 GPU、VRAM >= 18 GB、3 句 Gate >= 8 tok/s）→ 4 路並行單句翻譯（含 `STYLE_ADULT` + `tw2sp` + plain fallback + 嚴格 AI 拒答檢測不誤殺正常台詞）＋批次斷點續傳（含 Drive FUSE 5 次寫檔防抖重試）→ `s2twp` 轉台繁與 QA → 視結果回傳 `0` / `2` → `flush_and_unmount()` → 自動斷線釋放 L4。
    - *(第一次上真 L4 實跑建議先送 ~50 句試跑並檢查 `hymt2/work/llama.log` 的顯存餘裕，確認 `32768` context 未觸發 `-fit on` 回落 CPU。)*
 3. **本機 Agent 驗收並拉回結果：**
    ```powershell

@@ -385,6 +385,10 @@ class Hymt2ColabTests(unittest.TestCase):
                 self.assertIn("DISCONNECT_ON_ERROR = False", full_src)
                 self.assertIn("IDLE_UNASSIGN_MINUTES", full_src)
                 self.assertIn("STOP THE RUNTIME NOW", full_src)
+                self.assertIn("rc == 2", full_src)
+                self.assertIn("[PARTIAL]", full_src)
+                self.assertIn("rc in (0, 2)", full_src)
+                self.assertIn("rc not in (0, 2)", full_src)
             bridge_src = (HERE / "drive_bridge.py").read_text(encoding="utf-8")
             self.assertNotIn("copy2", bridge_src)
             for c in code_cells:
@@ -395,6 +399,155 @@ class Hymt2ColabTests(unittest.TestCase):
                 ast.parse(cleaned, filename=nb_name)
                 if nb_name == "hymt2_colab.ipynb" and "Popen" in src:
                     self.assertIn("runner.log", src)
+
+    def test_partial_exit_code_2_and_no_done_marker(self):
+        class _FailPlaceholdersHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                return
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                req_obj = json.loads(self.rfile.read(length).decode("utf-8"))
+                user_msg = req_obj["messages"][-1]["content"]
+                reply = "恢复完成！" if "potion" in user_msg else "敌人出现！"  # drops {{TAG_0}}
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                ev = json.dumps({"choices": [{"delta": {"content": reply}}]}, ensure_ascii=False)
+                self.wfile.write(f"data: {ev}\n\n".encode("utf-8"))
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+
+        srv = _ThreadedHTTPServer(("127.0.0.1", 0), _FailPlaceholdersHandler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                drive_root = root / "drive" / schema.DRIVE_ROOT_NAME
+                dirs = schema.ensure_drive_tree(drive_root)
+                rows = [
+                    {"id": "h1", "file": "f1", "kind": "system", "text": "Use potion."},
+                    {"id": "h2", "file": "f1", "kind": "system", "text": "{{TAG_0}} appeared!"},
+                ]
+                inp = dirs["hymt2_input"] / "partial_en.jsonl"
+                inp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+                schema.atomic_write_json(
+                    schema.manifest_path_for(inp),
+                    schema.build_manifest("partial_en", inp, len(rows)),
+                )
+                rc = runner.main(
+                    ["--drive-root", str(drive_root), "--api-base", f"http://127.0.0.1:{port}/v1",
+                     "--skip-gpu-check", "--manifest-wait", "0"]
+                )
+                self.assertEqual(rc, runner.EXIT_PARTIAL)
+                self.assertFalse(schema.done_marker_path(dirs["hymt2_output"], "partial_en").is_file())
+                self.assertTrue((dirs["hymt2_output"] / "partial_en.zh_CN.jsonl").is_file())
+                self.assertTrue((dirs["hymt2_output"] / "partial_en.zh_TW.jsonl").is_file())
+                qa = json.loads((dirs["hymt2_output"] / "partial_en.qa_report.json").read_text("utf-8"))
+                self.assertEqual(qa["failures"], 1)
+                self.assertEqual(qa["missing"], 1)
+                fails = [
+                    json.loads(ln)
+                    for ln in (dirs["hymt2_work"] / "partial_en.failures.jsonl").read_text("utf-8").splitlines()
+                    if ln.strip()
+                ]
+                self.assertEqual(len(fails), 1)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_checkpoint_io_retry_and_gpu_log_resilience(self):
+        import builtins
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            ckpt = root / "retry.checkpoint.jsonl"
+            gpu_log = root / "retry.gpu.log"
+            real_open = builtins.open
+            calls = [0]
+
+            def flaky_open(file, *args, **kwargs):
+                if Path(file) == ckpt and calls[0] < 2:
+                    calls[0] += 1
+                    raise OSError("transient Drive FUSE stall")
+                return real_open(file, *args, **kwargs)
+
+            with mock.patch("builtins.open", side_effect=flaky_open), mock.patch.object(runner.time, "sleep"):
+                runner._append_checkpoint_rows(
+                    ckpt,
+                    [{"wid": "w000001", "zh_cn": "测试成功"}],
+                    retries=5,
+                    base_delay=0.01,
+                )
+            self.assertEqual(calls[0], 2)
+            lines = [json.loads(ln) for ln in ckpt.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(lines[0]["zh_cn"], "测试成功")
+
+            def always_fail_open(file, *args, **kwargs):
+                if Path(file) in (ckpt, gpu_log):
+                    raise OSError("persistent FUSE error")
+                return real_open(file, *args, **kwargs)
+
+            with mock.patch("builtins.open", side_effect=always_fail_open), mock.patch.object(runner.time, "sleep"):
+                with self.assertRaises(OSError):
+                    runner._append_checkpoint_rows(
+                        ckpt,
+                        [{"wid": "w000002", "zh_cn": "不会写入"}],
+                        retries=3,
+                        base_delay=0.01,
+                    )
+                runner._log_gpu_progress(1, 10, gpu_log, skip_gpu_check=True)
+
+    def test_midrun_server_crash_returns_fatal_not_partial(self):
+        class _DeadProc:
+            def __init__(self):
+                self.returncode = -9
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                return None
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def kill(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            drive_root = root / "drive" / schema.DRIVE_ROOT_NAME
+            dirs = schema.ensure_drive_tree(drive_root)
+            rows = [{"id": "c1", "file": "f1", "kind": "dialogue", "text": "Hello!"}]
+            inp = dirs["hymt2_input"] / "crash_en.jsonl"
+            inp.write_text(json.dumps(rows[0], ensure_ascii=False) + "\n", encoding="utf-8")
+            schema.atomic_write_json(
+                schema.manifest_path_for(inp),
+                schema.build_manifest("crash_en", inp, 1),
+            )
+            with mock.patch.object(runner, "query_gpu_stats", return_value={"name": "NVIDIA L4", "memory_total_mib": 23034.0}), \
+                 mock.patch.object(runner, "ensure_llama_server", return_value=Path("/content/bin/llama-server")), \
+                 mock.patch.object(runner, "stage_model", return_value=Path("/content/models/HyMT2.gguf")), \
+                 mock.patch.object(runner, "start_and_verify_server", return_value=(_DeadProc(), "http://127.0.0.1:9/v1")), \
+                 mock.patch.object(runner, "translate_job", return_value={"job": "crash_en", "failures": 1, "missing": 1}):
+                with self.assertRaises(RuntimeError) as ctx:
+                    runner.main(["--drive-root", str(drive_root), "--manifest-wait", "0"])
+                self.assertIn("llama-server exited unexpectedly", str(ctx.exception))
+
+    def test_notebook_exit_code_disconnect_matrix(self):
+        def _sim_should_disconnect(rc: int, auto_disconnect: bool, disconnect_on_error: bool) -> bool:
+            return (rc in (0, 2) and auto_disconnect) or (rc not in (0, 2) and disconnect_on_error)
+
+        self.assertTrue(_sim_should_disconnect(0, True, False))
+        self.assertTrue(_sim_should_disconnect(2, True, False))
+        self.assertFalse(_sim_should_disconnect(1, True, False))
+        self.assertFalse(_sim_should_disconnect(-9, True, False))
+        self.assertFalse(_sim_should_disconnect(2, False, False))
+        self.assertTrue(_sim_should_disconnect(1, True, True))
 
 
 if __name__ == "__main__":
