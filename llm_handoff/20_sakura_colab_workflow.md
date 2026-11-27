@@ -123,12 +123,15 @@ Replace the `vast.ai` rental workflow for the Japanese -> Traditional Chinese Ga
 ## 5. Operational Runbook & Incremental Repair Playbook
 
 ### Standard New Job
-1. `python deploy/colab-sakura/drive_bridge.py doctor`
+1. `python deploy/colab-sakura/drive_bridge.py doctor` (or `python <instructions_dir>/drive_bridge.py doctor` when working outside the repo)
 2. `python deploy/colab-sakura/drive_bridge.py validate --input <job.jsonl> [--glossary <glossary.json>]`
 3. `python deploy/colab-sakura/drive_bridge.py push --input <job.jsonl> [--glossary <glossary.json>] --name <job>`
 4. Operator opens latest `sakura_colab.ipynb` on **Colab L4 GPU** (`DISCONNECT_ON_ERROR=False`, `IDLE_UNASSIGN_MINUTES=15`, `AUTO_DISCONNECT=True`) and runs `Ctrl+F9`.
 5. `python deploy/colab-sakura/drive_bridge.py status --name <job>`
 6. `python deploy/colab-sakura/drive_bridge.py pull --name <job> --dest <out_dir>`
+7. **Post-pull Drive cleanup:** ONLY after `pull` passes SHA-256 + ID parity and local outputs are verified saved on disk, delete the completed job's residual files from `sakura/input/`, `sakura/work/`, and `sakura/output/` so the next Colab job never scans stale files. **Never** delete `models/`, `bin/`, or `scripts/`.
+
+> **Standalone instructions export:** Every export to `<instructions_dir>/sakura-ollama-colab/` must bundle all **11 files** (the 9 files under `deploy/colab-sakura/` plus `20_sakura_colab_workflow.md` and `21_colab_session_postmortem.md`).
 
 ### Incremental Repair After Partial Failure (`failures > 0` or `no_cjk > 0`)
 1. Inspect `sakura/work/<job>.failures.jsonl` (contains `unit_key`, `errors`, `expected_placeholders`, `observed_placeholders`, `suggested_fix`) and/or `sakura/output/<job>.qa_report.json`.

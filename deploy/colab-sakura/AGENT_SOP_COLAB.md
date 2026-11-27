@@ -58,7 +58,7 @@ Colab 端掛載於 `/content/drive/MyDrive/galgame_mtl`，Windows 桌面版會�
 ## 三、本機 Agent 標準作業流程（Phase 0 → Phase 4）
 
 ### Phase 0：雲盤環境體檢
-先確認使用者的 Google Drive 桌面版已啟動、帳號磁碟已鎖定且模型就緒：
+先確認使用者的 Google Drive 桌面版已啟動、帳號磁碟已鎖定且模型就緒（若 Agent 目前位於獨立遊戲資料夾、非本 Repo 根目錄，請直接呼叫獨立指令包內的 `python <instructions_dir>/drive_bridge.py ...`，例如 `~/Documents/Instructions/hanhua/game/sakura-ollama-colab/drive_bridge.py`）：
 ```powershell
 python deploy/colab-sakura/drive_bridge.py doctor
 ```
@@ -97,26 +97,26 @@ python deploy/colab-sakura/drive_bridge.py doctor
    ```
    （若同名任務需覆蓋重推，才加 `--force`。）
 3. **在此暫停並向使用者回報**：
-   > 「已完成本機驗證並推送 `<job>.jsonl` 與 `.manifest.json` 至雲端硬碟。請打開 Google Colab（確認硬體為 **L4 GPU**）開啟 `sakura_colab.ipynb` 並按 **`Ctrl+F9` 全部執行**，跑完或自動斷線後再通知我驗收。」
+   > 「已完成本機驗證並推送 `<job>.jsonl` 與 `.manifest.json` 至雲端硬碟。請打開 Google Colab（確認硬體為 **L4 GPU**）使用**最新版本的 `sakura_colab.ipynb`**（雲端 `scripts/` 會自動同步 `runner.py`，但若曾更新結束碼 / 待機保護流程請務必重開最新 Notebook）並按 **`Ctrl+F9` 全部執行**，跑完或自動斷線後再通知我驗收。」
 
 ### Phase 3：Colab L4 端自動執行內容（供 Agent 掌握全貌）
 使用者按下 `Ctrl+F9` 後，`runner.py` 會全自動執行：
 1. 讀 `.manifest.json` 比對輸入檔 SHA-256（若 Drive 桌面版尚未完全同步，最多輪詢等待 60 秒）。
 2. 確認 `nvidia-smi` 總顯存 >= `22,000 MiB`（拒絕 T4）、從 Drive `bin/` 解壓預編譯 `llama-server-l4-b12019.tar.gz`（若不存在則自動從本專案 GitHub Release 秒速下載並快取，Colab 全程零編譯）、驗證 `--list-devices` 含 `CUDA0`、從 `models/` 循序複製 GGUF 到 `/content/models/`（絕不直接 mmap Drive FUSE）。
-3. 啟動 `llama-server`（ctx `16384`, `-np 4`, `-ngl 999`, `--device CUDA0 --cont-batching`），檢查日誌 `offloaded X/X layers to GPU` 且實佔 VRAM >= `12,000 MiB`。
+3. 啟動 `llama-server`（ctx `16384`, `-np 4`, `-ngl 999`, `--device CUDA0 --cont-batching -lv 4`），檢查日誌 `offloaded X/X layers to GPU` 且實佔 VRAM >= `12,000 MiB`。
 4. 執行 3 句 Gate 並要求生成速度 `>= 8.0 tok/s`。
 5. 以 `(kind, speaker, text)`（SHA-1 `unit_key`）去重並載入 checkpoint（相容舊版 `wid` 遷移），優先套用 `override` 欄位與 `<job>.overrides.jsonl`（直接走 `t2s` 透傳、免經 GPU），其餘分 4 路並行送 batch 8 翻譯；單句失敗會依錯誤類型僅在 `system` prompt 加入針對性重試指示（`user` prompt 尾端永遠維持官方原文格式），無法解決的句子寫入含 `unit_key`、`attempts`、`expected_placeholders`、`observed_placeholders`、`suggested_fix` 的 `work/<job>.failures.jsonl`。
 6. 當 `missing=0`、`failures=0`、`no_cjk=0`、`latin_only=0` 全數通過時才寫入 `output/<job>.DONE.json` 並回傳結束碼 **`0`（`EXIT_OK`）**；若全數單元已跑完、譯文／`checkpoint.jsonl`／`failures.jsonl` 均已寫入但仍有少數未通過項目（且 `llama-server` 未崩潰）則**不寫 `.DONE.json`** 並回傳結束碼 **`2`（`EXIT_PARTIAL`）**，Notebook 僅印出平靜的 `[PARTIAL]` 摘要、不拋 `RuntimeError`、同步 Drive 後照 `AUTO_DISCONNECT=True` 自動釋放 L4 省點數。唯有啟動 Gate 0–4、輸入檔異常、`checkpoint.jsonl` 連續 I/O 失敗或推論中 `llama-server` 意外終止才會回傳/拋錯 **`1`（`EXIT_FATAL`）**，`finally` 先 sync 日誌並 `drive.flush_and_unmount()`，且預設 `DISCONNECT_ON_ERROR=False` 會印出 `STOP THE RUNTIME NOW` 並於 `IDLE_UNASSIGN_MINUTES=15` 後自動釋放 GPU 防呆（中途寫入 `checkpoint.jsonl` 具 5 次指數退避重試，`gpu.log` 寫入失敗僅警告不中斷）。
 
 ### Phase 4：狀態檢查 → 增量修復（若需）→ 拉回驗證
-使用者告知 Colab 跑完後：
+使用者告知 Colab 跑完（`[DONE]` 或 `[PARTIAL]` 皆已自動存檔並釋放 L4）後：
 1. 檢查雲端結果與 QA：
    ```powershell
    python deploy/colab-sakura/drive_bridge.py status --name game_ch01
    ```
-   - 確認 `done_verified: true` 且 `failures: 0`、`qa.missing: 0`、`qa.no_cjk: 0`。
-   - **增量修復（`failures > 0` 或 `qa.no_cjk > 0`）：**
-     1. 檢視 `<Drive>\...\sakura\work\game_ch01.failures.jsonl` 內的 `errors`、`expected_placeholders` 與 `suggested_fix`。
+   - 若回傳 `[DONE]`：確認 `done_verified: true` 且 `failures: 0`、`qa.missing: 0`、`qa.no_cjk: 0`。
+   - **若 Colab 顯示 `[PARTIAL]`（`rc = 2`）或 `status` 顯示 `failures > 0` / `qa.no_cjk > 0`，請進行增量修復（絕不重翻已完成單元）：**
+     1. 檢視 `<Drive>\...\sakura\work\game_ch01.failures.jsonl` 內的 `errors`、`expected_placeholders` 與 `suggested_fix`，以及 `sakura/output/game_ch01.qa_report.json`。
      2. 可將外來語專有名詞補充到 `glossary.json`，或直接建立 `sakura/input/game_ch01.overrides.jsonl`（每行含 `"translation"` 及 `"id"` / `"unit_key"` / `"kind"+"speaker"+"text"`）。
      3. 在 Colab 的 `sakura_colab.ipynb` 勾選 `REPAIR_ONLY = True`、`TARGET_JOB = "game_ch01"` 重跑（或本機接端點執行 `runner.py --repair-only --job game_ch01`）——runner 會保留已成功的快取譯文完全不動，僅補翻缺漏／失敗單元並重算 QA。
 2. 拉回本機（強制核對 `.DONE.json` 所有檔案 SHA-256 及 `id` 順序 100% 一致）：
@@ -124,6 +124,11 @@ python deploy/colab-sakura/drive_bridge.py doctor
    python deploy/colab-sakura/drive_bridge.py pull --name game_ch01 --dest work/translated
    ```
 3. 檢查 `work/translated/game_ch01.qa_report.json` 的 `manual_overrides`、`repaired`、`roundtrip_mismatches` 與 `watch_chars` 一對多字清單，再接續原本的遊戲資產寫回與本地 E2E 測試。
+
+### Phase 4.5：拉回驗證通過後的雲盤殘留清理（必做）
+1. **僅在確認** `drive_bridge.py pull` 成功、所有 `.zh_TW.jsonl` / `.zh_CN.jsonl` / `.qa_report.json` / `.DONE.json` 已完整保存於本機工作區（且寫回或備份完成）**之後**，才能清理雲盤。
+2. 清理目標**僅限本次已完成任務**位於雲端硬碟目錄下的殘留檔：`sakura/input/`、`sakura/work/`、`sakura/output/`（以及若不再沿用之任務專屬 `sakura/glossary.json`），避免下一款遊戲啟動 Colab 時掃描到舊任務殘留、造成錯誤或重複執行。
+3. **絕對不可刪除**共用的 `models/`、`bin/` 與 `scripts/`。
 
 ---
 
