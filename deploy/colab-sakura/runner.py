@@ -67,8 +67,8 @@ GATE_SAMPLES = [
     {"id": "gate-3", "kind": "dialogue", "speaker": "ユイ", "text": "あっ……ダメ、そこは敏感なんだから……♥"},
 ]
 
-_JA_PRESENT_RE = re.compile(r"[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fff]")
-_KANA_RE = re.compile(r"[\u3040-\u309f\u30a0-\u30ff]")
+_JA_PRESENT_RE = re.compile(r"[\u3041-\u3096\u30a1-\u30fa\u4e00-\u9fff]")
+_KANA_RE = re.compile(r"[\u3041-\u3096\u309d-\u309f\u30a1-\u30fa\u30fd-\u30ff]")
 _CJK_RE = re.compile(r"[\u3400-\u9fff]")
 _TEMPLATE_LEAK_RE = re.compile(
     r"(<\|im_start\|>|<\|im_end\|>|</?think[^>]*>|历史翻译：|参考以下术语表|根据以上术语表)"
@@ -791,6 +791,22 @@ def repair_quotes(source: str, output: str) -> tuple[str, list[str]]:
             ):
                 s = s.replace("『", "「").replace("』", "」")
                 flags.append("repair_double_brackets")
+            elif (
+                "《" not in source
+                and "》" not in source
+                and s.count("《") == deficit_o
+                and s.count("》") == deficit_c
+            ):
+                s = s.replace("《", "「").replace("》", "」")
+                flags.append("repair_title_quotes")
+            elif (
+                "【" not in source
+                and "】" not in source
+                and s.count("【") == deficit_o
+                and s.count("】") == deficit_c
+            ):
+                s = s.replace("【", "「").replace("】", "」")
+                flags.append("repair_lenticular_quotes")
 
     if s.count("「") == src_o and s.count("」") == src_c:
         return s, flags
@@ -880,8 +896,9 @@ def normalize_output_line(
                 if "glossary_subst" not in flags:
                     flags.append("glossary_subst")
 
-    if src_text.startswith("\u3000") and not s.startswith("\u3000"):
-        s = "\u3000" + s.lstrip()
+    lead_fw = len(src_text) - len(src_text.lstrip("\u3000"))
+    if lead_fw > 0:
+        s = ("\u3000" * lead_fw) + s.lstrip("\u3000 \t")
     canonical = to_simplified(s)
     raw_saved: str | None = None
     if canonical != s:

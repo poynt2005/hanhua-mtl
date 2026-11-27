@@ -520,6 +520,14 @@ class SakuraColabTests(unittest.TestCase):
         self.assertEqual(q_curly, "要开始第1章「勇者之剑」吗？")
         self.assertIn("repair_curly_quotes", fl_curly)
 
+        q_title, fl_title = runner.repair_quotes("第1章「勇者の剣」を開始しますか？", "要开始第1章《勇者之剑》吗？")
+        self.assertEqual(q_title, "要开始第1章「勇者之剑」吗？")
+        self.assertIn("repair_title_quotes", fl_title)
+
+        q_lent, fl_lent = runner.repair_quotes("第1章「勇者の剣」を開始しますか？", "要开始第1章【勇者之剑】吗？")
+        self.assertEqual(q_lent, "要开始第1章「勇者之剑」吗？")
+        self.assertIn("repair_lenticular_quotes", fl_lent)
+
         # 5) Inner unfixable quote asymmetry still caught cleanly
         self.assertIn(
             "quote_asymmetry_mismatch",
@@ -527,6 +535,19 @@ class SakuraColabTests(unittest.TestCase):
         )
 
     def test_kana_glossary_and_overrides(self):
+        # Middle dot ・ (U+30FB) and prolonged dash ー (U+30FC) must NOT false-trigger residual_kana
+        self.assertEqual(runner.validate_unit_translation("ＨＰ・ＭＰ回復", "HP・MP回复"), [])
+        self.assertEqual(runner.validate_unit_translation("薬・即効", "创可贴・急救"), [])
+        self.assertEqual(runner.validate_unit_translation("うー", "呜ー"), [])
+        self.assertFalse(runner.needs_translation({"kind": "ui", "text": "HP・MP"}))
+        for bad_ch in ("あ", "ア", "っ", "ッ"):
+            self.assertIn("residual_kana", runner.validate_unit_translation("テスト", f"测试{bad_ch}"))
+
+        # Exact leading full-width indent count preserved
+        u_ind = {"kind": "narration", "speaker": None, "text": "\u3000\u3000\u3000静か。"}
+        cn_ind, _, _ = runner.normalize_output_line("\u3000安静。", u_ind, [])
+        self.assertTrue(cn_ind.startswith("\u3000\u3000\u3000"))
+
         # Glossary substitution on residual kana & overrides.jsonl pass-through without GPU
         gl = [
             {"src": "ハニー", "dst": "哈尼", "note": ""},
