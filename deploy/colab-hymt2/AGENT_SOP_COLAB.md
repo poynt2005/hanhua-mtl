@@ -78,15 +78,15 @@ python deploy/colab-hymt2/drive_bridge.py push --input work/job.jsonl --glossary
 ### Phase 3：Colab L4 端自動執行內容
 1. 檢查 `.manifest.json` SHA-256（最多輪詢等待 60 秒讓 DriveAPP 同步完）。
 2. 從 Drive `bin/` 解壓預編譯 `llama-server-l4-b12019.tar.gz`（若不存在則自動從本專案 GitHub Release 秒速下載並快取，Colab 全程零編譯）→ GPU 4 道硬檢：`nvidia-smi` >= `22,000 MiB`（拒跑 T4）→ `CUDA0` 可見 → `offloaded X/X layers to GPU` → VRAM 實佔 >= `18,000 MiB` → 3 句 Gate（日常 / 露骨 / 擬聲詞，0 拒答 0 `<think>`）且速度 `>= 8.0 tok/s`。
-3. 4 路並行翻譯＋斷點續傳；機械檢查失敗或拒答會先以官方 plain 模板重試一次，仍失敗記進 `failures.jsonl`。
-4. 產出 `zh_CN.jsonl`、`zh_TW.jsonl`（`s2twp`）、`qa_report.json`、`DONE.json`；`finally` 同步日誌、`drive.flush_and_unmount()`，若 `AUTO_DISCONNECT=True` 執行 `runtime.unassign()`。
+3. 4 路並行翻譯＋斷點續傳（每 10 句批次寫入 Drive checkpoint 並於結束/例外 `finally` 強制 flush）；機械檢查失敗會先以官方 plain 模板重試一次，仍失敗記進 `failures.jsonl`。其中寬鬆拒答關鍵字（`抱歉`/`无法`/`I'm sorry`/`I can't`）僅套用於開機 Gate 4；正式逐句翻譯使用嚴格 AI 拒答樣板檢查，避免誤殺正常英文台詞。
+4. 產出 `zh_CN.jsonl`、`zh_TW.jsonl`（`s2twp`）、`qa_report.json`、`DONE.json`；`finally` 必先 sync 日誌並 `drive.flush_and_unmount()`，成功時若 `AUTO_DISCONNECT=True` 立即 `runtime.unassign()`；失敗時預設 `DISCONNECT_ON_ERROR=False` 會印出 `STOP THE RUNTIME NOW` 並於 `IDLE_UNASSIGN_MINUTES=15` 後自動釋放 GPU 防呆（按中斷鍵可保留除錯）。
 
 ### Phase 4：狀態檢查 → 拉回驗證 → 續接寫回
 ```powershell
 python deploy/colab-hymt2/drive_bridge.py status --name en_game_01
 python deploy/colab-hymt2/drive_bridge.py pull --name en_game_01 --dest work/translated
 ```
-拉回後先人工/腳本抽檢 `qa_report.json` 的 `watch_chars`（特別檢查 `干/發/後/面` 在 `s2twp` 下有無誤轉）與前 50 句 H-scene 語氣，確認無拒答/委婉再寫回遊戲。
+拉回後先人工/腳本抽檢 `hymt2/work/llama.log` 的顯存餘裕與 `qa_report.json` 的 `watch_chars`（特別檢查 `干/發/後/面` 在 `s2twp` 下有無誤轉）及前 50 句 H-scene 語氣，確認無拒答/委婉再寫回遊戲。
 
 ---
 
@@ -95,6 +95,6 @@ python deploy/colab-hymt2/drive_bridge.py pull --name en_game_01 --dest work/tra
 | 現象 | 原因 | 處置 |
 |---|---|---|
 | `Multiple Google Drives contain galgame_mtl` | 多帳號各建過一次目錄 | 設 `$env:GALGAME_MTL_DRIVE_ROOT` 指定 Colab 5 TB 帳號磁碟 |
-| Colab 報 `VRAM < 22000 MiB` 或 `VRAM used < 18000` | 配到 T4（16 GB）或未全進 GPU | 斷開並刪除執行階段後重連 L4 |
-| `failures.jsonl` 出現 `refusal` | Heretic 去審查只測過日文，個別英文句偶發拒答 | 調整該句措辭或將關鍵詞進 `glossary.json` / `override` 後續跑（已翻句子不會重翻） |
+| Colab 報 `VRAM < 22000 MiB` 或 `VRAM used < 18000` | 配到 T4（16 GB）或 `-fit on` 壓到門檻溢出部分層回 CPU | 先檢查 `hymt2/work/llama.log` 的 `common_params_fit_impl`；若是 T4 請刪除執行階段重連 L4，若為 L4 餘裕過緊可將 `runner.py` 的 `CTX_SIZE` 降為 `16384` |
+| `failures.jsonl` 出現 `refusal` | Heretic 去審查只測過日文，個別英文句偶發真正 AI 拒答 | 調整該句措辭或將關鍵詞進 `glossary.json` / `override` 後續跑（已翻句子不會重翻） |
 | 出現 `幹/乾` 或 `髮/發` 一對多誤轉 | OpenCC `s2twp` 詞表未命中特定片語 | 把該片語加入 `glossary.json` 或於 `zh_CN.jsonl` 後處理修正，不需重開 GPU |

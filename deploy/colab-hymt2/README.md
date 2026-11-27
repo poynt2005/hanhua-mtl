@@ -26,7 +26,9 @@
    python deploy/colab-hymt2/drive_bridge.py push --input work/en_game.jsonl --glossary work/glossary.json --name en_01
    ```
 2. **你打開 `hymt2_colab.ipynb`（確認選 L4 GPU）→ 按 `Ctrl+F9`：**
-   - **Colab 端完全不含任何編譯流程**，直接完成：從 Drive `bin/` 解壓預編譯 `llama-server-l4-b12019.tar.gz`（若缺失則從本專案 GitHub Release 秒速下載並驗證 SHA-256 後寫回 Drive `bin/`）→ 模型複製到本地 SSD → **GPU 4 道硬鎖檢查**（拒跑 T4、驗證 100% 層數進 GPU、VRAM >= 18 GB、3 句 Gate >= 8 tok/s）→ 4 路並行單句翻譯（含 `STYLE_ADULT` + `tw2sp` + plain fallback）＋斷點續傳 → `s2twp` 轉台繁與 QA → 寫入 `.DONE.json` → `flush_and_unmount()` → 自動斷線釋放 L4。
+   - **Notebook 重要參數：** `AUTO_DISCONNECT = True`（成功即自動釋放 GPU）；`DISCONNECT_ON_ERROR = False`（預設錯後先同步日誌並印出 `STOP THE RUNTIME NOW` 方便除錯，並以 `IDLE_UNASSIGN_MINUTES = 15` 倒數自動斷線防止持續計費）。
+   - **Colab 端完全不含任何編譯流程**，直接完成：從 Drive `bin/` 解壓預編譯 `llama-server-l4-b12019.tar.gz`（若缺失則從 GitHub Release 秒速下載並驗證 SHA-256 後寫回 Drive `bin/`）→ 模型複製到本地 SSD → **GPU 4 道硬鎖檢查**（拒跑 T4、驗證 100% 層數進 GPU、VRAM >= 18 GB、3 句 Gate >= 8 tok/s）→ 4 路並行單句翻譯（含 `STYLE_ADULT` + `tw2sp` + plain fallback + 嚴格 AI 拒答檢測不誤殺正常台詞）＋批次斷點續傳 → `s2twp` 轉台繁與 QA → 寫入 `.DONE.json` → `flush_and_unmount()` → 自動斷線釋放 L4。
+   - *(第一次上真 L4 實跑建議先送 ~50 句試跑並檢查 `hymt2/work/llama.log` 的顯存餘裕，確認 `32768` context 未觸發 `-fit on` 回落 CPU。)*
 3. **本機 Agent 驗收並拉回結果：**
    ```powershell
    python deploy/colab-hymt2/drive_bridge.py status --name en_01
