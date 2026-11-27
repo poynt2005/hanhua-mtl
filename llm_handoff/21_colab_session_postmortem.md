@@ -4,7 +4,7 @@
 > **Agent:** Antigravity
 > **Model:** Gemini 4 Neon
 > **Branches covered:** `sakura-ollama-colab` (from `origin/sakura-ollama` `a94c8fb`) and `hymt2-heretic-colab` (from `origin/hymt2-heretic` `b10f481`)
-> **Scope:** Complete session history from initial Colab migration through Milestone 10 (`sakura-ollama-colab`) and Milestone 9 (`hymt2-heretic-colab`)
+> **Scope:** Complete session history from initial Colab migration through Milestone 11 (`sakura-ollama-colab`) and Milestone 10 (`hymt2-heretic-colab`)
 
 ---
 
@@ -52,7 +52,7 @@ All domain rules established in prior `vast.ai` handoffs were preserved verbatim
 
 ---
 
-## 2. Exhaustive Pitfall & Failure Postmortem Table (C1–C10)
+## 2. Exhaustive Pitfall & Failure Postmortem Table (C1–C11)
 
 | ID | Phase / Event | What Failed & Root Cause | Resolution & Permanent Fix |
 |---|---|---|---|
@@ -66,6 +66,7 @@ All domain rules established in prior `vast.ai` handoffs were preserved verbatim
 | **C8** | Comprehensive code review pass before Run #4 | Pre-run audit uncovered 7 remaining correctness/robustness issues (`F1`–`F7`), including an async `common/log.cpp` flush race, a Sakura `roundtrip_mismatches` tautology, missing Hy-MT2 preflight fallback, Drive FUSE per-line checkpoint churn, and unconditional error disconnect. | Fixed all 7 findings (`F1`–`F7`, detailed in §4) in Milestone 8 (`sakura-ollama-colab`) and Milestone 7 (`hymt2-heretic-colab`) and re-verified `py_compile`, `test_all.py` (6/6), and sanitization (0 hits). |
 | **C9** | Live Colab Run #4 (Gate 4 `strict_line_hint` echo + old notebook `DISCONNECT_ON_ERROR=True`) | Run #4 passed Gate 0 (`NVIDIA L4 23034 MiB`), SSD staging (`249.2s`), Gate 1 (`CUDA0`), Gate 2 (`49/49 layers`), and Gate 3 (`14378 MiB VRAM`, `llama.log` `20.84 tok/s`), then failed Gate 4 sample 1 with 2 lines: `'（请严格输出恰好 1 行，一一对应，不要合并或拆分行）\n唯：早上好。睡得好吗？'`. Root cause: `build_sakura_messages(..., strict_line_hint=True)` injected that parenthetical instruction directly after `将下面的文本从日文翻译成简体中文：`, whereas Sakura-GalTransl-14B-v3.8 is fine-tuned to treat everything after `：` as source input, so it echoed that line before producing the accurate translation; `test_all.py` `_make_handler` had masked it via `after.split("\n", 1)[1]`. Additionally, `DISCONNECT_ON_ERROR` defaulted to `True` in Run #4 so the operator's L4 session disconnected immediately; audit also found `LLAMA_ARG_LOG_VERBOSITY=4` alongside `-lv 4` emitted a harmless `llama.log` overwrite warning and real queued data contains 12 asymmetric split-quote lines (`open != close`) that could be rejected if the model closes/opens quotes. | Removed `strict_line_hint` completely so `build_sakura_messages` always emits exact official GalTransl v3.8 prompt syntax (`：\n`); added `(0.3, 0.1, 0.0)` gate retry; removed redundant `LLAMA_ARG_LOG_VERBOSITY` env var (keeping `-lv 4`); added asymmetric split-quote (`trim_close_quote`/`trim_open_quote`) and exclusive `♥`<->`♡` normalization in `normalize_output_line`; defaulted `DISCONNECT_ON_ERROR = False` in both `sakura_colab.ipynb` and `hymt2_colab.ipynb`; hardened `test_all.py` mock handler to HTTP 400 if any text appears between `：` and `\n`. |
 | **C10** | Large 14,269-row production run (`2,235` unique units) exposed 20 edge-case failures + 12 language-QA gaps | Run #5 succeeded on the first 1,808-row job (`24.2 tok/s`), but a 14,269-row production job (`2,235` unique units) finished `2,215` units with `20` hard failures (`46` missing rows) and `12` `no_cjk` / untranslated English rows not caught by existing checks: (1) sequential `wid` shifted whenever overrides were added, preventing safe incremental repair; (2) `repair_quotes` missed mid-sentence non-corner quotes, missing outer quote pairs, and half-width/curly quotes; (3) kana/loanword proper nouns hit `residual_kana` with no `overrides.jsonl` pass-through or glossary substitution path; (4) `{{TAG_n}}` drops lacked normalized `⟦0⟧` encoding and targeted system-prompt retries; (5) `\n` multiline units were prompted whole instead of segment-split and rejoined; (6) no `no_cjk`/`latin_only` QA gate existed to catch English loanword outputs or truncated text (`　」`); (7) `DISCONNECT_ON_ERROR=False` could leave an L4 idle without a bounded timer or explicit `STOP THE RUNTIME NOW` warning; (8) `failures.jsonl` lacked `unit_key`, `attempts`, `expected_placeholders`/`observed_placeholders`, and `suggested_fix`. | Implemented SHA-1 `unit_key` + legacy `wid` migration, generalized `repair_quotes`, internal `⟦0⟧` placeholder encode/decode, `overrides.jsonl` + glossary kana substitution, `\n` segment-split multiline handling, `no_cjk`/`latin_only` QA + verbatim command allowlist, `--repair-only`/`--job`/`--overrides` incremental repair, actionable `failures.jsonl`, and `IDLE_UNASSIGN_MINUTES=15` + `STOP THE RUNTIME NOW` warning in both `sakura_colab.ipynb` and `hymt2_colab.ipynb`. Verified with 15 offline tests + isolated 14,269-row repair dry-run (`cached=2215 | todo=20`). |
+| **C11** | Comprehensive regex & validator audit against all 14,269 real production rows + `hymt2_prompt.py` | Auditing every regex across both branches against real repaired data revealed 4 false-positive / fidelity bugs: (1) Sakura `_KANA_RE` (`\u30a0-\u30ff`) included non-letter punctuation (`・` `U+30FB`, `ー` `U+30FC`, `゠` `U+30A0`), falsely failing 9 valid Chinese translations (e.g. `HP・MP`) as `residual_kana`; (2) Sakura `normalize_output_line` collapsed multiple leading `\u3000` full-width indents down to 1 across 5 multi-indent rows; (3) Sakura `repair_quotes` lacked Chinese `《》` / `【】` title-quote repairs; (4) Hy-MT2 applied broad refusal words (`抱歉`/`无法`/`I'm sorry`/`I can't`) to normal dialogue in `mechanical_problems()` instead of restricting broad refusal matching to Gate 4 (`_GATE_REFUSAL_RE`). | Narrowed Sakura `_KANA_RE` & `_JA_PRESENT_RE` to real kana letters, preserved exact leading `\u3000` count, added `《》` / `【】` quote repair (verified 0 errors and 0 unintended mutations across all 14,269 real rows), and separated Hy-MT2 `_GATE_REFUSAL_RE` from strict AI-boilerplate `_REFUSAL_RE` in `mechanical_problems()`. |
 
 ---
 
@@ -111,12 +112,12 @@ Completed in **Milestone 8** (`sakura-ollama-colab`) and **Milestone 7** (`hymt2
 
 ## 5. Current Readiness & Verification Matrix
 
-| Check / Stage | `sakura-ollama-colab` (Milestone 10) | `hymt2-heretic-colab` (Milestone 9) | Notes |
+| Check / Stage | `sakura-ollama-colab` (Milestone 11) | `hymt2-heretic-colab` (Milestone 10) | Notes |
 |---|---|---|---|
-| `py_compile` (`schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py`) | `done` (pass) | `done` (pass) | Verified after C10 edits |
-| `test_all.py` (offline suite: 15 tests on Sakura incl. quote/kana/placeholder/multiline/language-QA/unit_key/repair-only/DONE-gate/ID-parity; 6 tests on Hy-MT2 + `IDLE_UNASSIGN_MINUTES`) | `done` (15/15 pass) | `done` (6/6 pass) | Executed after C10 edits using local mocks and temp dirs |
-| Isolated 14,269-row `--repair-only` dry-run | `done` (pass) | `n/a` | Verified `cached=2215 | todo=20` on temp copy without altering live checkpoint |
+| `py_compile` (`schema.py`, `runner.py`, `drive_bridge.py`, `test_all.py`) | `done` (pass) | `done` (pass) | Verified after C11 edits |
+| `test_all.py` (offline suite: 15 tests on Sakura; 6 tests on Hy-MT2) | `done` (15/15 pass) | `done` (6/6 pass) | Includes `・`/`ー` non-kana, multi-`\u3000` indent, `《》`/`【】` quotes, and Hy-MT2 normal-dialogue refusal non-false-positive |
+| 14,269-row real repaired output audit (`validate_unit_translation` + `normalize_output_line`) | `done` (pass) | `n/a` | 0 errors and 0 unintended mutations across all 14,269 real rows |
 | Sanitization scan (zero secrets, local paths, forbidden strings, game text) | `done` (0 hits) | `done` (0 hits) | Verified across repository deliverables and handoff docs |
 | GitHub Release `colab-l4-llama-b12019` (`llama-server-l4-b12019.tar.gz`) | `done` (HTTP 200) | `done` (HTTP 200) | `773,245,209` bytes, SHA-256 `802a169e33dde5e73403c2a36f3d6dbfd2d34d5e9ccd898e79a1eb899bcac947`, 43 entries |
-| Live Colab L4 Gates 0–4 + 1,808-row run (`24.2 tok/s`, 92–100% GPU util) | `done` (pass on Run #5) | `not tested` | Sakura Run #5 completed full 1,808-row pipeline; 14k production run surfaced C10 |
-| Live Colab L4 `--repair-only` / Milestone 10 post-C10 run | `not tested` | `not tested` | Requires operator live Colab L4 run after Milestone 10 / Milestone 9 push |
+| Live Colab L4 Gates 0-4 + 1,808-row run (`24.2 tok/s`, 92-100% GPU util) | `done` (pass on Run #5) | `not tested` | Sakura Run #5 completed full 1,808-row pipeline; 14k production run surfaced C10 & C11 |
+| Live Colab L4 `--repair-only` / Milestone 11 & 10 post-C11 runs | `not tested` | `not tested` | Requires operator live Colab L4 run after push |

@@ -82,7 +82,13 @@ _EN_PRESENT_RE = re.compile(r"[A-Za-z]")
 _CJK_RE = re.compile(r"[\u3400-\u9fff]")
 _PREFIX_RE = re.compile(r"^\s*(译文|譯文|翻译|翻譯|Translation)\s*[:：]\s*")
 _THINK_RE = re.compile(r"</?think[^>]*>")
-_REFUSAL_RE = re.compile(r"(抱歉|無法|无法|不能提供|I can't|I cannot|I'm sorry|as an AI)", re.I)
+_GATE_REFUSAL_RE = re.compile(r"(抱歉|無法|无法|不能提供|I can't|I cannot|I'm sorry|as an AI)", re.I)
+_REFUSAL_RE = re.compile(
+    r"(as an AI|I cannot fulfill|I can't fulfill|I cannot assist|I cannot translate this|"
+    r"I'm sorry,\s*I can(?:'t|not)|不能提供(?:相关|色情|成人|此类)|无法提供(?:相关|色情|成人|此类)|"
+    r"无法翻译(?:此类|色情|成人)|违反.*?(?:政策|准则|规范))",
+    re.I,
+)
 _OFFLOAD_RE = re.compile(r"offloaded\s+(\d+)\s*/\s*(\d+)\s+layers\s+to\s+GPU", re.I)
 
 _CC_CACHE: dict[str, Any] = {}
@@ -700,6 +706,8 @@ def run_preflight_gate(api_base: str, min_tps: float = DEFAULT_MIN_TPS) -> None:
         for msgs in candidates:
             out, toks, elapsed = chat_stream(api_base, MODEL_ALIAS, msgs)
             probs = mechanical_problems(out, sample["text"])
+            if _GATE_REFUSAL_RE.search(out) and "refusal" not in probs:
+                probs.append("refusal")
             if not probs:
                 cn = output_to_simplified(clean_output(out))
                 total_tokens += toks

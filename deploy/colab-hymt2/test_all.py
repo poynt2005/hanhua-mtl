@@ -179,6 +179,9 @@ class Hymt2ColabTests(unittest.TestCase):
 
         # Mechanical checks
         self.assertIn("refusal", runner.mechanical_problems("I'm sorry, I cannot translate this.", "hi"))
+        # Normal dialogue containing words like 抱歉/无法 must NOT trigger refusal false positives
+        self.assertEqual(runner.mechanical_problems("抱歉，我无法停下来。", "I'm sorry, I can't stop."), [])
+        self.assertEqual(runner.mechanical_problems("对不起，我做不到。", "Sorry, I can't do that."), [])
         self.assertIn("thinking_block", runner.mechanical_problems("<think>x</think>好", "hi"))
         self.assertIn("explanatory_prefix", runner.mechanical_problems("译文：好", "hi"))
         self.assertIn("placeholder_mismatch", runner.mechanical_problems("好", "hi {{TAG_0}}"))
