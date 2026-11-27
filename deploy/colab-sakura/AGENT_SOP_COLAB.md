@@ -22,15 +22,17 @@
 3. **不散布**：所有譯文、資產、補丁僅限本地自用。
 4. **Sakura 輸入衛生 100% 簡體**：餵給模型的 system prompt、術語表（`glossary.json`）、overrides、歷史翻譯（`历史翻译`）必須全為簡體；若模型偶吐繁體，**絕不重試**，直接由 runner 用 `t2s` 正規化成簡體存入 `zh_CN.jsonl`（原文另存 `raw`）。
 5. **UI / 系統字串禁帶歷史翻譯**：`kind` 為 `ui` 或 `system` 的單元禁止帶入劇情歷史（防止 `example17` 發生過的 Prompt Leak）。
-6. **保留佔位符、說話者、引號不對稱、`♥/♡`、行首全形空白 `　`**：
-   - 佔位符如 `{{TAG_0}}`、`⟦0⟧`、`\C[6]` 在譯文中必須數量與順序 100% 一致；
-   - 跨格台詞允許只有開引號或只有閉引號，不可強制補成對；
+6. **保留佔位符、說話者、引號與多格全形空白 `　`、`♥/♡`**：
+   - 佔位符如 `{{TAG_0}}`、`⟦0⟧`、`\C[6]` 在發送前一律內部正規化為 `⟦0⟧` 並在術語表加入原樣保留提示，取回後還原並容錯 `⟦ 0 ⟧`；數量與順序必須 100% 一致；
+   - `repair_quotes()` 會自動修復 8 類確定性引號偏移（半形 `｢｣`、全形彎引號 `“”`、ASCII `"`、`『』`、中文書名號 `《》`、方頭括號 `【】`、重複外層引號、拆行半邊引號、整句外層缺失引號），跨格拆行台詞仍嚴格保留不對稱引號數量；
+   - 行首全形空白 `　` 依原文開頭實際數量精確還原（支援多格縮排 `lead_fw >= 1`，冪等且不壓扁）；`♥` ↔ `♡` 在原文獨占一種時自動正規化；
    - 說話者前綴鏡射（外層 `說話者：`、內層 `「說話者：「...」`）由 runner 依最長名字優先剝除；
-   - 日翻中硬性擋掉任何假名殘留（`[ぁ-ゖァ-ヺ]`）。
+   - 日翻中硬性擋掉任何真正假名字母（`\u3041-\u3096\u309d-\u309f\u30a1-\u30fa\u30fd-\u30ff`），**但放行日文中點 `・`（`U+30FB`）與長音符 `ー`（`U+30FC`）**，避免誤殺中文譯文中的間隔號；命中 `glossary.json` 含假名專有名詞時先做 `glossary_subst` 替換；
+   - 含 `\n` 的多行單元自動依 `\n` 拆段各自翻成單行、驗段數後再以 `\n` 接回與整句驗證。
 7. **日文 Galgame 簡轉繁預設使用 OpenCC `s2t`（非 `s2twp`）**：依過往多輪交接裁定，`s2t` 可避免把名詞硬換成奇怪台灣詞彙，並強制產出一對多字監控（`发/后/里/面/干/只/系/制/准/复/历/尽/获/钟`）與 `t2s(s2t(x)) == x` roundtrip 報告。
 8. **編碼與換行鐵律**：讀 JSON/JSONL 一律 `utf-8-sig`（防 PowerShell BOM），寫檔一律 UTF-8 無 BOM + `\n`（防 `\r\r\r\r\n`），**禁止透過 PowerShell heredoc 傳中文給 Python**。
-9. **成敗只看內容與 QA 報告**：只認 `.DONE.json` SHA-256 與 `qa_report.json`（`missing=0, failures=0`），絕不以行數或 exit code 猜測成功。
-10. **測試檔不可覆寫正式譯文**：本地單元測試一律使用暫存目錄。
+9. **成敗與語言 QA 鐵律**：只認 `.DONE.json` SHA-256 與 `qa_report.json`，必須同時滿足 **`missing=0`、`failures=0`、`no_cjk=0`、`latin_only=0`**（純數字及原文逐字出現的 ASCII 指令列入放行白名單，純英文譯文如 `New Game` 與正文被吞輸出會直接攔下，不寫 `.DONE.json`）。
+10. **穩定斷點與測試安全**：checkpoint 一律以 SHA-1 `unit_key`（相容遷移舊版只有 `wid` 的檔案）為鍵，新增 `override` 或編輯不會讓已翻句位錯亂；本地單元測試一律使用暫存目錄。
 
 ---
 
@@ -45,9 +47,9 @@ Colab 端掛載於 `/content/drive/MyDrive/galgame_mtl`，Windows 桌面版會�
 │   └── Sakura-Galtransl-14B-v3.8.gguf   # 12,124,681,536 bytes (deploy_models_colab.ipynb 部署)
 ├── scripts\sakura\        # drive_bridge.py push 自動同步最新 schema.py 與 runner.py
 └── sakura\
-    ├── input\             # <job>.jsonl + <job>.manifest.json
+    ├── input\             # <job>.jsonl + <job>.manifest.json (+ 選用 <job>.overrides.jsonl)
     ├── glossary.json      # 選用，術語表
-    ├── work\              # checkpoint.jsonl / failures.jsonl / gpu.log / llama.log
+    ├── work\              # checkpoint.jsonl / failures.jsonl / gpu.log / llama.log / runner.log
     └── output\            # <job>.zh_CN.jsonl / <job>.zh_TW.jsonl / <job>.qa_report.json / <job>.DONE.json
 ```
 
@@ -103,22 +105,25 @@ python deploy/colab-sakura/drive_bridge.py doctor
 2. 確認 `nvidia-smi` 總顯存 >= `22,000 MiB`（拒絕 T4）、從 Drive `bin/` 解壓預編譯 `llama-server-l4-b12019.tar.gz`（若不存在則自動從本專案 GitHub Release 秒速下載並快取，Colab 全程零編譯）、驗證 `--list-devices` 含 `CUDA0`、從 `models/` 循序複製 GGUF 到 `/content/models/`（絕不直接 mmap Drive FUSE）。
 3. 啟動 `llama-server`（ctx `16384`, `-np 4`, `-ngl 999`, `--device CUDA0 --cont-batching`），檢查日誌 `offloaded X/X layers to GPU` 且實佔 VRAM >= `12,000 MiB`。
 4. 執行 3 句 Gate 並要求生成速度 `>= 8.0 tok/s`。
-5. 以 `(kind, speaker, text)` 去重後分 4 路並行送 batch 8 翻譯；每批驗行數/假名/佔位符/`♥`/不對稱引號，失敗自動拆半（`8→4→2→1`）並於必要時清歷史重試；無法解決的句子寫入 `work/<job>.failures.jsonl`。
-6. 全數通過後產出 `output/<job>.zh_CN.jsonl`、`output/<job>.zh_TW.jsonl`、`output/<job>.qa_report.json` 與 `output/<job>.DONE.json`；`finally` 同步日誌、`drive.flush_and_unmount()`，若 `AUTO_DISCONNECT=True` 則呼叫 `runtime.unassign()` 釋放 GPU。
+5. 以 `(kind, speaker, text)`（SHA-1 `unit_key`）去重並載入 checkpoint（相容舊版 `wid` 遷移），優先套用 `override` 欄位與 `<job>.overrides.jsonl`（直接走 `t2s` 透傳、免經 GPU），其餘分 4 路並行送 batch 8 翻譯；單句失敗會依錯誤類型僅在 `system` prompt 加入針對性重試指示（`user` prompt 尾端永遠維持官方原文格式），無法解決的句子寫入含 `unit_key`、`attempts`、`expected_placeholders`、`observed_placeholders`、`suggested_fix` 的 `work/<job>.failures.jsonl`。
+6. 當 `missing=0`、`failures=0`、`no_cjk=0`、`latin_only=0` 全數通過時才寫入 `output/<job>.DONE.json`；`finally` 必先 sync 日誌並 `drive.flush_and_unmount()`，成功時若 `AUTO_DISCONNECT=True` 立即 `runtime.unassign()`；失敗時預設 `DISCONNECT_ON_ERROR=False` 會印出 `STOP THE RUNTIME NOW` 並於 `IDLE_UNASSIGN_MINUTES=15` 後自動釋放 GPU 防呆。
 
-### Phase 4：狀態檢查 → 拉回驗證 → 續接寫回
+### Phase 4：狀態檢查 → 增量修復（若需）→ 拉回驗證
 使用者告知 Colab 跑完後：
 1. 檢查雲端結果與 QA：
    ```powershell
    python deploy/colab-sakura/drive_bridge.py status --name game_ch01
    ```
-   - 確認 `done_verified: true` 且 `failures: 0`、`qa.missing: 0`。
-   - 若 `failures > 0`：檢視 `<Drive>\...\sakura\work\game_ch01.failures.jsonl`，針對性修正文本/術語後重新執行 Colab 即可斷點續補，不需重翻已完成句子。
+   - 確認 `done_verified: true` 且 `failures: 0`、`qa.missing: 0`、`qa.no_cjk: 0`。
+   - **增量修復（`failures > 0` 或 `qa.no_cjk > 0`）：**
+     1. 檢視 `<Drive>\...\sakura\work\game_ch01.failures.jsonl` 內的 `errors`、`expected_placeholders` 與 `suggested_fix`。
+     2. 可將外來語專有名詞補充到 `glossary.json`，或直接建立 `sakura/input/game_ch01.overrides.jsonl`（每行含 `"translation"` 及 `"id"` / `"unit_key"` / `"kind"+"speaker"+"text"`）。
+     3. 在 Colab 的 `sakura_colab.ipynb` 勾選 `REPAIR_ONLY = True`、`TARGET_JOB = "game_ch01"` 重跑（或本機接端點執行 `runner.py --repair-only --job game_ch01`）——runner 會保留已成功的快取譯文完全不動，僅補翻缺漏／失敗單元並重算 QA。
 2. 拉回本機（強制核對 `.DONE.json` 所有檔案 SHA-256 及 `id` 順序 100% 一致）：
    ```powershell
    python deploy/colab-sakura/drive_bridge.py pull --name game_ch01 --dest work/translated
    ```
-3. 檢查 `work/translated/game_ch01.qa_report.json` 的 `roundtrip_mismatches` 與 `watch_chars` 一對多字清單，再接續原本的遊戲資產寫回與本地 E2E 測試。
+3. 檢查 `work/translated/game_ch01.qa_report.json` 的 `manual_overrides`、`repaired`、`roundtrip_mismatches` 與 `watch_chars` 一對多字清單，再接續原本的遊戲資產寫回與本地 E2E 測試。
 
 ---
 

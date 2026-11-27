@@ -72,7 +72,7 @@ All domain rules established in prior `vast.ai` handoffs were preserved verbatim
 
 ## 3. Operator Frustration & Accountability Log
 
-This section records honestly the 7 operator frustration incidents from this session so future agents understand the exact mistakes made, why they cost time and compute units, and the non-negotiable guardrails required going forward.
+This section records honestly all 9 operator frustration incidents from this session so future agents understand the exact mistakes made, why they cost time and compute units, and the non-negotiable guardrails required going forward.
 
 | # | Incident | Root Cause & Impact |
 |---|---|---|
@@ -82,15 +82,19 @@ This section records honestly the 7 operator frustration incidents from this ses
 | **4** | **Proposing `an external free cloud Linux host` compilation before noticing upstream prebuilt binaries** | Even though `vast.ai` Dockerfiles never compiled from source (`ollama/ollama:latest` and `ghcr.io/ggml-org/llama.cpp:server-cuda-b12019`), the agent suggested compiling on `an external free cloud Linux host` instead of using official `ggml-org/llama.cpp` `b12019` releases, forcing the operator to challenge why any build was needed at all and call out accountability for the wasted compute units. |
 | **5** | **Operator had to ask twice whether agent skill/SOP docs needed updating** | While the 737 MB prebuilt bundle upload was running, the operator had to prompt twice before the agent addressed updating the workflow/skill/SOP documentation to match the zero-compile architecture. |
 | **6** | **Live Colab Run #3 lost a scarce L4 right after 12.12 GB copy + 4.6 s model load** | Because `parse_gpu_offload_log` assumed `b12019` printed `offloaded X/Y layers to GPU` at default verbosity without checking `b12019` `common/log.cpp` (`LOG_LEVEL_TRACE = 4` vs default `3`), Gate 2 falsely killed a healthy GPU-loaded server and `runtime.unassign()` immediately dropped a scarce L4 GPU allocation. |
-| **7** | **Live Colab Run #4 still hit Gate 4 `strict_line_hint` echo and disconnected another L4 VM** | After fixing Gate 2 (`-lv 4`), Run #4 passed Gates 0–3 on real L4 (`49/49` layers, `14378 MiB`), only to fail Gate 4 because `runner.py` injected `strict_line_hint` after `：`, violating GalTransl v3.8's trained prompt format while the mock handler's `split("\n", 1)[1]` masked the deviation offline; meanwhile `DISCONNECT_ON_ERROR` defaulted to `True` in the notebook so failing disconnected the L4 again. |
+| **7** | **Live Colab Run #4 still hit Gate 4 `strict_line_hint` echo and disconnected another L4 VM** | After fixing Gate 2 (`-lv 4`), Run #4 passed Gates 0-3 on real L4 (`49/49` layers, `14378 MiB`), only to fail Gate 4 because `runner.py` injected `strict_line_hint` after `：`, violating GalTransl v3.8's trained prompt format while the mock handler's `split("\n", 1)[1]` masked the deviation offline; meanwhile `DISCONNECT_ON_ERROR` defaulted to `True` in the notebook so failing disconnected the L4 again. |
+| **8** | **Large 14,269-row production run left 20 unrepairable failures + 12 undetected `no_cjk` / English outputs** | Although Run #5 succeeded cleanly on the 1,808-row validation job, running a 14,269-row (`2,235` unique-unit) production job via a downstream agent exposed missing deterministic quote/placeholder/multiline repairs, sequential `wid` cache invalidation preventing incremental `--repair-only` runs, no `no_cjk`/`latin_only` QA gate, and no bounded `IDLE_UNASSIGN_MINUTES` timer when `DISCONNECT_ON_ERROR=False`. |
+| **9** | **Auditing C10 against 14,269 real production rows uncovered 4 more preventable false-positive bugs** | Testing the C10 runner directly against all 14,269 repaired production rows and `hymt2_prompt.py` revealed `_KANA_RE` flagging `・` (`U+30FB`) in valid Chinese (`9` of the `20` production failures were actually false-positive `・` lines), multi-`\u3000` indents collapsing to `1` across `60` rows, missing `《》`/`【】` title-quote repairs, and Hy-MT2 `_REFUSAL_RE` flagging normal dialogue words (`抱歉`/`无法`) — eroding operator trust due to incomplete real-data validation earlier. |
 
 ### Permanent Non-Negotiable Agent Guardrails
 1. **Answer questions first:** Never branch, edit files, or run mutations before directly answering an operator's pending question.
 2. **Prebuilt-first, zero-compile on paid GPUs:** Always inspect upstream official releases and existing `Dockerfile`s first. Never compile C++/CUDA engines on paid Colab/cloud GPUs when pinned upstream binaries exist.
 3. **Never let a run die silently:** Always tee subprocess stdout/stderr live to a persistent log file (`runner.log`) and surface log tails in exceptions before any teardown runs.
 4. **Verify exact pinned upstream behavior before gating:** Check the actual pinned version's source/CLI flags (e.g., `b12019` `common/log.cpp` `-lv 4` and `scripts/ui-assets.cmake`) against real behavior rather than assuming log strings or CMake defaults.
-5. **Protect scarce GPU allocations during interactive runs:** Keep `DISCONNECT_ON_ERROR` configurable in notebooks so operators watching interactively do not lose an L4 VM and 5 minutes of 12–18 GB SSD staging on a recoverable error.
-6. **Keep skills, SOPs, and handoff docs synchronized immediately:** Whenever architecture or tooling changes (e.g., removing compilation, adding `bin/` pre-deploy), update `AGENT_SOP_COLAB.md`, `skill/SKILL.md`, `README.md`, and `llm_handoff/` without waiting to be asked twice.
+5. **Protect scarce GPU allocations with bounded timers:** Default `DISCONNECT_ON_ERROR = False` in notebooks for interactive debugging, ALWAYS flush Drive first, print `STOP THE RUNTIME NOW` with idle cost, and enforce `IDLE_UNASSIGN_MINUTES` (default `15`) so an idle runtime can never bill indefinitely.
+6. **Keep skills, SOPs, and handoff docs synchronized immediately:** Whenever architecture or tooling changes, update `AGENT_SOP_COLAB.md`, `skill/SKILL.md`, `README.md`, and `llm_handoff/` without waiting to be asked twice.
+7. **Never tamper with fine-tuned prompt triggers and never write permissive mocks:** Keep `将下面的文本从日文翻译成简体中文：\n` verbatim with zero injected text before `\n`; put retry guidance only in `system` role and test mocks must reject prompt deviations with HTTP 400.
+8. **Audit every regex, normalizer, and validator against real production data fixtures:** Explicitly verify Unicode punctuation boundaries (such as `U+30FB`/`U+30FC` inside `U+30A0..U+30FF`), idempotency of normalizers, and dialogue non-false-positives against real datasets before shipping.
 
 ---
 
@@ -121,3 +125,18 @@ Completed in **Milestone 8** (`sakura-ollama-colab`) and **Milestone 7** (`hymt2
 | GitHub Release `colab-l4-llama-b12019` (`llama-server-l4-b12019.tar.gz`) | `done` (HTTP 200) | `done` (HTTP 200) | `773,245,209` bytes, SHA-256 `802a169e33dde5e73403c2a36f3d6dbfd2d34d5e9ccd898e79a1eb899bcac947`, 43 entries |
 | Live Colab L4 Gates 0-4 + 1,808-row run (`24.2 tok/s`, 92-100% GPU util) | `done` (pass on Run #5) | `not tested` | Sakura Run #5 completed full 1,808-row pipeline; 14k production run surfaced C10 & C11 |
 | Live Colab L4 `--repair-only` / Milestone 11 & 10 post-C11 runs | `not tested` | `not tested` | Requires operator live Colab L4 run after push |
+
+---
+
+## 6. Architecture Snapshot & Immediate Next Steps
+
+### 6.1 Branch Isolation & Deliverables
+- **`sakura-ollama-colab`** (`deploy/colab-sakura/`): `schema.py`, `runner.py`, `drive_bridge.py`, `deploy_models_colab.ipynb`, `sakura_colab.ipynb`, `AGENT_SOP_COLAB.md`, `skill/SKILL.md`, `README.md`, `test_all.py`.
+- **`hymt2-heretic-colab`** (`deploy/colab-hymt2/`): `schema.py`, `runner.py`, `drive_bridge.py`, `deploy_models_colab.ipynb`, `hymt2_colab.ipynb`, `AGENT_SOP_COLAB.md`, `skill/SKILL.md`, `README.md`, `test_all.py`.
+- **`master`**, **`sakura-ollama`**, **`hymt2-heretic`**, all `Dockerfile`s, and `.github/workflows/**` remain completely untouched.
+
+### 6.2 Key Pending Live Checks (`not tested` on real Colab L4 GPU)
+1. **Sakura post-C11 live Colab L4 run:** First real Colab L4 run using `--repair-only` / `<job>.overrides.jsonl` and post-C11 regex/indent normalization.
+2. **Hy-MT2 first live Colab L4 boot (`deploy/colab-hymt2/`):**
+   - `HYV3ForCausalLM` (`hy_v3`) GGUF load, `49`-layer offload, and actual VRAM margin on Colab L4 (`22,369 MiB` free observed vs `~20.8-21.2 GiB` projected at `CTX_SIZE=32768`, near `b12019` `-fit on`'s `1,024 MiB` free-memory target — inspect `llama.log` `common_params_fit_impl`; if `-fit on` drops any layers to CPU, lower `CTX_SIZE` to `16384`).
+   - English adult H-scene refusal rate, `STYLE_ADULT` quality, and `s2twp` one-to-many character spot checks (`干`/`发`/`后`).
