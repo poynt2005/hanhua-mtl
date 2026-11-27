@@ -380,6 +380,8 @@ class Hymt2ColabTests(unittest.TestCase):
                 self.assertNotIn("REBUILD_LLAMA_BIN", full_src)
                 self.assertNotIn("--rebuild-bin", full_src)
                 self.assertIn("DISCONNECT_ON_ERROR = False", full_src)
+                self.assertIn("IDLE_UNASSIGN_MINUTES", full_src)
+                self.assertIn("STOP THE RUNTIME NOW", full_src)
             bridge_src = (HERE / "drive_bridge.py").read_text(encoding="utf-8")
             self.assertNotIn("copy2", bridge_src)
             for c in code_cells:
