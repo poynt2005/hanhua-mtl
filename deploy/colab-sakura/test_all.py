@@ -6,6 +6,7 @@ Leaves zero artifacts in the repository.
 from __future__ import annotations
 
 import ast
+import contextlib
 import http.server
 import io
 import json
@@ -541,7 +542,7 @@ class SakuraColabTests(unittest.TestCase):
     def test_kana_glossary_and_overrides(self):
         # Middle dot ・ (U+30FB) and prolonged dash ー (U+30FC) must NOT false-trigger residual_kana
         self.assertEqual(runner.validate_unit_translation("ＨＰ・ＭＰ回復", "HP・MP回复"), [])
-        self.assertEqual(runner.validate_unit_translation("薬・即効", "创可贴・急救"), [])
+        self.assertEqual(runner.validate_unit_translation("鍵・予備", "钥匙・备用"), [])
         self.assertEqual(runner.validate_unit_translation("うー", "呜ー"), [])
         self.assertFalse(runner.needs_translation({"kind": "ui", "text": "HP・MP"}))
         for bad_ch in ("あ", "ア", "っ", "ッ"):
@@ -554,14 +555,14 @@ class SakuraColabTests(unittest.TestCase):
 
         # Glossary substitution on residual kana & overrides.jsonl pass-through without GPU
         gl = [
-            {"src": "ハニー", "dst": "哈尼", "note": ""},
-            {"src": "イフリート", "dst": "伊弗利特", "note": ""},
-            {"src": "ノーム", "dst": "诺姆", "note": ""},
-            {"src": "バンソコ", "dst": "创可贴", "note": ""},
+            {"src": "ポルカ", "dst": "波尔卡", "note": ""},
+            {"src": "グリフォン", "dst": "格里芬", "note": ""},
+            {"src": "ペガサス", "dst": "天马", "note": ""},
+            {"src": "ホチキス", "dst": "订书机", "note": ""},
         ]
-        u = {"kind": "dialogue", "speaker": "ユイ", "text": "イフリートだよ！"}
-        cn, _, flags = runner.normalize_output_line("这是イフリート哦！", u, ["ユイ"], matched_glossary=gl)
-        self.assertEqual(cn, "这是伊弗利特哦！")
+        u = {"kind": "dialogue", "speaker": "ユイ", "text": "グリフォンだよ！"}
+        cn, _, flags = runner.normalize_output_line("这是グリフォン哦！", u, ["ユイ"], matched_glossary=gl)
+        self.assertEqual(cn, "这是格里芬哦！")
         self.assertIn("glossary_subst", flags)
         self.assertEqual(runner.validate_unit_translation(u["text"], cn), [])
 
@@ -570,8 +571,8 @@ class SakuraColabTests(unittest.TestCase):
             drive_root = root / "drive" / schema.DRIVE_ROOT_NAME
             dirs = schema.ensure_drive_tree(drive_root)
             rows = [
-                {"id": "k1", "file": "f1", "kind": "ui", "text": "ハニー"},
-                {"id": "k2", "file": "f1", "kind": "ui", "text": "バンソコ"},
+                {"id": "k1", "file": "f1", "kind": "ui", "text": "ポルカ"},
+                {"id": "k2", "file": "f1", "kind": "ui", "text": "ホチキス"},
             ]
             inp = dirs["sakura_input"] / "kana_job.jsonl"
             inp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
@@ -581,8 +582,8 @@ class SakuraColabTests(unittest.TestCase):
             )
             ov = dirs["sakura_input"] / "kana_job.overrides.jsonl"
             ov.write_text(
-                json.dumps({"id": "k1", "translation": "哈尼"}, ensure_ascii=False) + "\n"
-                + json.dumps({"kind": "ui", "text": "バンソコ", "translation": "創可貼"}, ensure_ascii=False) + "\n",
+                json.dumps({"id": "k1", "translation": "波尔卡"}, ensure_ascii=False) + "\n"
+                + json.dumps({"kind": "ui", "text": "ホチキス", "translation": "訂書機"}, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
             # All resolved via overrides -> zero HTTP/GPU calls needed
@@ -597,11 +598,11 @@ class SakuraColabTests(unittest.TestCase):
 
     def test_placeholder_repair_and_failure_record(self):
         # Encoding {{TAG_0}} -> ⟦0⟧ and decoding spaced ⟦ 0 ⟧ back to {{TAG_0}}
-        enc, tokens = runner.encode_placeholders("{{TAG_0}}の{{TAG_1}}を {{TAG_2}} 奪った！")
-        self.assertEqual(enc, "⟦0⟧の⟦1⟧を ⟦2⟧ 奪った！")
+        enc, tokens = runner.encode_placeholders("{{TAG_0}}と{{TAG_1}}は {{TAG_2}} 並んだ！")
+        self.assertEqual(enc, "⟦0⟧と⟦1⟧は ⟦2⟧ 並んだ！")
         self.assertEqual(tokens, ["{{TAG_0}}", "{{TAG_1}}", "{{TAG_2}}"])
-        dec, pflags = runner.decode_placeholders("夺走了⟦ 0 ⟧的⟦1⟧共⟦2⟧！", tokens)
-        self.assertEqual(dec, "夺走了{{TAG_0}}的{{TAG_1}}共{{TAG_2}}！")
+        dec, pflags = runner.decode_placeholders("排好了⟦ 0 ⟧的⟦1⟧共⟦2⟧！", tokens)
+        self.assertEqual(dec, "排好了{{TAG_0}}的{{TAG_1}}共{{TAG_2}}！")
         self.assertIn("repair_placeholder", pflags)
 
         # Dropped/reordered placeholder triggers targeted retry, then writes actionable failure record
@@ -619,7 +620,7 @@ class SakuraColabTests(unittest.TestCase):
                 marker = "将下面的文本从日文翻译成简体中文："
                 src_block = user_msg.split(marker, 1)[1][1:].strip()
                 # Succeed for good_unit, always drop ⟦0⟧ for bad_unit
-                reply = "恢复成功！" if "テスト" in src_block else "怪物出现了！"
+                reply = "恢复成功！" if "テスト" in src_block else "包裹到了！"
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
@@ -637,7 +638,7 @@ class SakuraColabTests(unittest.TestCase):
                 root = Path(td)
                 drive_root = root / "drive" / schema.DRIVE_ROOT_NAME
                 dirs = schema.ensure_drive_tree(drive_root)
-                rows = [{"id": "p1", "file": "sys", "kind": "system", "text": "{{TAG_0}}が出現！"}]
+                rows = [{"id": "p1", "file": "sys", "kind": "system", "text": "{{TAG_0}}が届いた！"}]
                 inp = dirs["sakura_input"] / "ph_job.jsonl"
                 inp.write_text(json.dumps(rows[0], ensure_ascii=False) + "\n", encoding="utf-8")
                 schema.atomic_write_json(
@@ -686,14 +687,15 @@ class SakuraColabTests(unittest.TestCase):
                 user_msg = req_obj["messages"][-1]["content"]
                 src_block = user_msg.split("将下面的文本从日文翻译成简体中文：", 1)[1][1:].strip()
                 seen_prompts.append(src_block)
-                # Return two lines once on seg2 to verify segment retry!
-                if "薬" in src_block and fail_seg2_once[0]:
+                reply_lines = [
+                    "邮递员已经到了！" if "郵便屋" in ln else "现在贴上邮票！"
+                    for ln in src_block.splitlines()
+                ]
+                # Merge both segments once: the wrong line count must be retried
+                if fail_seg2_once[0]:
                     fail_seg2_once[0] = False
-                    reply = "第一行\n第二行"
-                elif "冒険" in src_block:
-                    reply = "冒险中受伤了！这种时候就用特制"
-                else:
-                    reply = "速效治疗药！立刻见效！"
+                    reply_lines = ["".join(reply_lines)]
+                reply = "\n".join(reply_lines)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
@@ -708,33 +710,33 @@ class SakuraColabTests(unittest.TestCase):
         t.start()
         try:
             u = {
-                "unit_key": runner.make_unit_key("system", None, "冒険中に負傷した！\n薬で回復！"),
+                "unit_key": runner.make_unit_key("system", None, "郵便屋が到着した！\n切手を貼る！"),
                 "wid": "w000001",
                 "file": "item",
                 "kind": "system",
                 "speaker": None,
-                "text": "冒険中に負傷した！\n薬で回復！",
+                "text": "郵便屋が到着した！\n切手を貼る！",
             }
             cn, _, _, fail = runner._translate_single_multiline(
                 f"http://127.0.0.1:{port}/v1", u, [], [], []
             )
             self.assertIsNone(fail)
-            self.assertEqual(cn, "冒险中受伤了！这种时候就用特制\n速效治疗药！立刻见效！")
-            # Must never send multi-line segment in one prompt
-            self.assertTrue(all("\n" not in p for p in seen_prompts))
+            self.assertEqual(cn, "邮递员已经到了！\n现在贴上邮票！")
+            # Segments are separate prompt lines of one request; a merged reply is retried
+            self.assertEqual([len(p.splitlines()) for p in seen_prompts], [2, 2])
         finally:
             srv.shutdown()
             srv.server_close()
 
     def test_language_qa_no_cjk_and_allowlist(self):
         # Must fail no_cjk + latin_only
-        self.assertEqual(runner.check_language_qa("ニューゲーム", "New Game"), ["no_cjk", "latin_only"])
-        self.assertEqual(runner.check_language_qa("「……サンクス！」", "「……Thanks！」"), ["no_cjk", "latin_only"])
+        self.assertEqual(runner.check_language_qa("ロードメニュー", "New Game"), ["no_cjk", "latin_only"])
+        self.assertEqual(runner.check_language_qa("「……グッドラック！」", "「……Good luck！」"), ["no_cjk", "latin_only"])
         # Lost body leaving only punctuation/whitespace must fail no_cjk
-        self.assertEqual(runner.check_language_qa("\u3000呼んでいるんだい？」", "\u3000」"), ["no_cjk"])
+        self.assertEqual(runner.check_language_qa("\u3000並べているのかな？」", "\u3000」"), ["no_cjk"])
         # Command example preserving verbatim ASCII tokens in source is allowlisted
         self.assertEqual(
-            runner.check_language_qa("例：「CmdChat StartState 4 1」", "「CmdChat StartState 4 1」"),
+            runner.check_language_qa("例：「DemoCmd SetMode 4 1」", "「DemoCmd SetMode 4 1」"),
             [],
         )
 
@@ -854,7 +856,7 @@ class SakuraColabTests(unittest.TestCase):
             root = Path(td)
             drive_root = root / "drive" / schema.DRIVE_ROOT_NAME
             dirs = schema.ensure_drive_tree(drive_root)
-            rows = [{"id": "d1", "file": "f1", "kind": "system", "text": "ニューゲーム"}]
+            rows = [{"id": "d1", "file": "f1", "kind": "system", "text": "ロードメニュー"}]
             inp = dirs["sakura_input"] / "bad_lang.jsonl"
             inp.write_text(json.dumps(rows[0], ensure_ascii=False) + "\n", encoding="utf-8")
             schema.atomic_write_json(
@@ -866,16 +868,19 @@ class SakuraColabTests(unittest.TestCase):
             ckpt.write_text(json.dumps({"wid": "w000001", "zh_cn": "New Game"}) + "\n", encoding="utf-8")
 
             rc = runner.main(
-                ["--drive-root", str(drive_root), "--api-base", "http://127.0.0.1:9/v1",
-                 "--repair-only", "--job", "bad_lang", "--skip-gpu-check", "--manifest-wait", "0"]
+                ["--drive-root", str(drive_root), "--assemble-only",
+                 "--job", "bad_lang", "--manifest-wait", "0"]
             )
             self.assertEqual(rc, runner.EXIT_PARTIAL)
             self.assertFalse(schema.done_marker_path(dirs["sakura_output"], "bad_lang").is_file())
             self.assertTrue((dirs["sakura_output"] / "bad_lang.zh_CN.jsonl").is_file())
             self.assertTrue((dirs["sakura_output"] / "bad_lang.zh_TW.jsonl").is_file())
             qa = json.loads((dirs["sakura_output"] / "bad_lang.qa_report.json").read_text("utf-8"))
-            self.assertEqual(qa["no_cjk"], 1)
-            self.assertEqual(qa["latin_only"], 1)
+            self.assertEqual(qa["cache_rejected_units"], 1)
+            self.assertEqual(qa["kept_source_rows"], 1)
+            self.assertTrue(qa["over_untranslated_limit"])
+            cn = json.loads((dirs["sakura_output"] / "bad_lang.zh_CN.jsonl").read_text("utf-8"))
+            self.assertEqual(cn["translation"], "ロードメニュー")
 
     def test_checkpoint_io_retry_and_gpu_log_resilience(self):
         import builtins
@@ -1008,6 +1013,243 @@ class SakuraColabTests(unittest.TestCase):
             out_ids = [r["id"] for r in tw_rows]
             self.assertEqual(out_ids, ["a1", "a2", "a3"])
             self.assertEqual(len(set(out_ids)), len(out_ids))
+
+    # ---- guards against broken output ---------------------------------------
+
+    def test_truncated_output_is_never_accepted(self):
+        with _reply_server(lambda lines, n: ("啊啊啊", "length")) as (api, prompts):
+            with self.assertRaises(runner.OutputTruncated):
+                runner.chat_stream(api, runner.MODEL_ALIAS, [{"role": "user", "content": _MARK + "\nあ"}])
+            self.assertEqual(len(prompts), 1, "truncation must not be retried as a transport error")
+            unit = _unit("切手帳を閉じる")
+            cn, _, _, fail = runner._translate_single_unit(api, unit, [], [], [])
+        self.assertIsNone(cn)
+        self.assertEqual(fail["errors"], ["truncated"])
+
+    def test_control_codes_never_reach_model_and_survive_byte_exact(self):
+        src = "\u3000「灯台っ_w!10,0,\u3000\u3000灯台っ_w!10,0,\u3000と鴎が鳴く_w!10,0,\u3000」"
+        self.assertEqual("".join(p for _, p in runner.split_segments(src)), src)
+        table = {"「灯台っ": "「灯塔", "灯台っ": "灯塔", "と鴎が鳴く": "海鸥在叫"}
+        with _reply_server(lambda lines, n: ("\n".join(table[ln.strip()] for ln in lines), "stop")) as (api, prompts):
+            cn, _, _, fail = runner._translate_single_unit(api, _unit(src), [], [], [])
+        self.assertIsNone(fail)
+        self.assertEqual(
+            cn, "\u3000「灯塔_w!10,0,\u3000\u3000灯塔_w!10,0,\u3000海鸥在叫_w!10,0,\u3000」"
+        )
+        self.assertEqual(len(prompts), 1)
+        self.assertNotIn("_w!", prompts[0])
+        # a damaged or dropped code is rejected, e.g. for rows already in a checkpoint
+        for bad in ("啊_ w!10,0,", "啊_w!10,0", "啊"):
+            self.assertIn("control_code_mismatch", runner.validate_unit_translation("あ_w!10,0,", bad))
+        # letters inside a control code are not English output
+        self.assertEqual(runner.check_language_qa("っ_w!10,0,\u3000」", "唔_w!10,0,\u3000」"), [])
+
+    def test_runaway_repetition_rejected_and_kept_out_of_history(self):
+        self.assertIn("repetition", runner.validate_unit_translation("ええええっ、切手が", "啊" * 40 + "，邮票"))
+        self.assertIn("repetition", runner.validate_unit_translation("灯台守は郵便屋の弟だ", "好棒" * 9))
+        self.assertIn("too_long", runner.check_runaway("はい", "是的" + "，真的是这样没有错" * 4))
+        # legitimate long moans and ordinary lines still pass
+        self.assertEqual(runner.validate_unit_translation("あ" * 30, "啊" * 30), [])
+        self.assertEqual(runner.validate_unit_translation("ああああっ", "啊啊啊啊啊啊啊啊啊"), [])
+        # small + full-size kana are one long sound; a Chinese rendering may use one character
+        self.assertEqual(
+            runner.validate_unit_translation("ぷわあああああああぁぁぁぁぁぁっ！", "噗" + "哇" * 20 + "！"), []
+        )
+        self.assertEqual(runner.compress_long_runs("お" * 25 + "ぉ" * 9 + "っ"), "お" * 6 + "ぉ" * 6 + "っ")
+
+        units = [_unit(f"台詞その{i}", wid=i) for i in range(2)]
+        with _reply_server(lambda lines, n: ("\n".join("啊" * 200 for _ in lines), "stop")) as (api, _):
+            ok, fails, hist = runner._translate_batch_recursive(api, units, [], ["之前的台词"], [])
+        self.assertEqual((ok, len(fails), hist), ({}, 2, ["之前的台词"]))
+
+    def test_interjection_rule_only_after_real_model_failure(self):
+        self.assertEqual(runner.interjection_fallback("っ_w!10,0,\u3000」"), "唔_w!10,0,\u3000」")
+        self.assertEqual(runner.interjection_fallback("…っ…」"), "…唔…」")
+        self.assertEqual(runner.interjection_fallback("えぇぇっ？」"), "诶诶诶？」")
+        self.assertIsNone(runner.interjection_fallback("うみだっ"))
+        self.assertIsNone(runner.interjection_fallback("今っ"))
+
+        echo = lambda lines, n: ("\n".join(lines), "stop")
+        with _reply_server(echo) as (api, prompts):
+            cn, _, flags, fail = runner._translate_single_unit(api, _unit("っ_w!10,0,\u3000」"), [], [], [])
+        self.assertEqual((cn, fail), ("唔_w!10,0,\u3000」", None))
+        self.assertIn("rule_fallback", flags)
+        self.assertEqual(len(prompts), 3, "the model gets all three tries first")
+
+        with mock.patch.object(runner.time, "sleep"):
+            cn, _, _, fail = runner._translate_single_unit(
+                "http://127.0.0.1:9/v1", _unit("っ"), [], [], []
+            )
+        self.assertIsNone(cn)
+        self.assertTrue(fail["errors"][0].startswith("transport:"))
+
+    def test_segment_retry_rescues_mixed_unit(self):
+        src = "えっ_w!10,0,\u3000郵便屋だ"
+
+        def reply(lines, n):
+            if len(lines) > 1:
+                return "合并成一行", "stop"
+            return ("啊" if lines[0].startswith("え") else "是邮递员"), "stop"
+
+        with _reply_server(reply) as (api, _):
+            cn, _, flags, fail = runner._translate_single_unit(api, _unit(src), [], [], [])
+        self.assertIsNone(fail)
+        self.assertEqual(cn, "啊_w!10,0,\u3000是邮递员")
+        self.assertIn("segment_retry", flags)
+
+    def test_untranslated_limit_review_file_and_zero_gpu_rebuild(self):
+        self.assertEqual(runner.untranslated_limit(31896, 0.001), 31)
+        self.assertEqual(runner.untranslated_limit(999, 0.001), 0)
+        # 国 would become 國 if kept Japanese were pushed through s2t
+        hard = "中国の話"
+        for extra_hard, want_rc in ((0, runner.EXIT_OK), (1, runner.EXIT_PARTIAL)):
+            with tempfile.TemporaryDirectory() as td:
+                dirs = schema.ensure_drive_tree(Path(td) / schema.DRIVE_ROOT_NAME)
+                rows = [{"id": f"n{i}", "kind": "narration", "text": f"文{i % 5}です"} for i in range(1000)]
+                rows[3]["text"] = hard
+                if extra_hard:
+                    rows[7]["text"] = hard + "だ"
+                _write_job(dirs, "lim", rows)
+
+                def reply(lines, n):
+                    if any(hard in ln for ln in lines):
+                        return "\n".join(lines), "stop"  # echoes kana -> always rejected
+                    return "\n".join("译文" for _ in lines), "stop"
+
+                buf = io.StringIO()
+                with _reply_server(reply) as (api, _), mock.patch("sys.stdout", buf):
+                    rc = runner.main(["--drive-root", str(dirs["root"]), "--api-base", api,
+                                      "--skip-gpu-check", "--manifest-wait", "0"])
+                self.assertEqual(rc, want_rc)
+                self.assertNotIn("units failed", buf.getvalue())
+                done = schema.done_marker_path(dirs["sakura_output"], "lim")
+                self.assertEqual(done.is_file(), want_rc == runner.EXIT_OK)
+                out = dirs["sakura_output"]
+                tw = [json.loads(x) for x in (out / "lim.zh_TW.jsonl").read_text("utf-8").splitlines()]
+                self.assertEqual(tw[3]["translation"], hard)
+                review = [json.loads(x) for x in (out / "lim.review.jsonl").read_text("utf-8").splitlines()]
+                self.assertEqual([r["status"] for r in review], ["kept_source"] * (1 + extra_hard))
+                self.assertEqual(review[0]["first_line"], 4)
+                attempts = (dirs["sakura_work"] / "lim.attempts.jsonl").read_text("utf-8")
+                self.assertIn('"raw": "' + hard, attempts)
+
+                # Fill in only the first review row, paste the file back as overrides, no server
+                review[0]["translation"] = "中国的事"
+                (dirs["sakura_input"] / "lim.overrides.jsonl").write_text(
+                    "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in review), encoding="utf-8"
+                )
+                rc = runner.main(["--drive-root", str(dirs["root"]), "--assemble-only",
+                                  "--job", "lim", "--manifest-wait", "0"])
+                # one unfilled row at most remains, which is within the limit of 1
+                self.assertEqual(rc, runner.EXIT_OK)
+                qa = json.loads((out / "lim.qa_report.json").read_text("utf-8"))
+                self.assertEqual((qa["kept_source_rows"], qa["manual_overrides"]), (extra_hard, 1))
+                self.assertTrue((dirs["sakura_work"] / "lim.attempts.jsonl").is_file())
+
+    def test_server_death_blocks_done_even_inside_limit(self):
+        with tempfile.TemporaryDirectory() as td:
+            dirs = schema.ensure_drive_tree(Path(td) / schema.DRIVE_ROOT_NAME)
+            rows = [{"id": f"s{i}", "kind": "narration", "text": f"文{i}です"} for i in range(2000)]
+            _write_job(dirs, "dead", rows)
+            # all but one unit cached; the last one hits an unreachable server
+            (dirs["sakura_work"] / "dead.checkpoint.jsonl").write_text(
+                "".join(
+                    json.dumps({"unit_key": runner.make_unit_key("narration", None, r["text"]), "zh_cn": "译文"}) + "\n"
+                    for r in rows[:-1]
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(runner.time, "sleep"):
+                rc = runner.main(["--drive-root", str(dirs["root"]), "--api-base", "http://127.0.0.1:9/v1",
+                                  "--skip-gpu-check", "--manifest-wait", "0"])
+            self.assertEqual(rc, runner.EXIT_PARTIAL)
+            self.assertFalse(schema.done_marker_path(dirs["sakura_output"], "dead").is_file())
+            qa = json.loads((dirs["sakura_output"] / "dead.qa_report.json").read_text("utf-8"))
+            self.assertEqual((qa["kept_source_rows"], qa["kept_source_limit_rows"]), (1, 2))
+            self.assertEqual(qa["transport_failed_units"], 1)
+
+    def test_bad_cached_rows_are_retranslated(self):
+        with tempfile.TemporaryDirectory() as td:
+            dirs = schema.ensure_drive_tree(Path(td) / schema.DRIVE_ROOT_NAME)
+            rows = [
+                {"id": "c1", "kind": "narration", "text": "えっ_w!10,0,\u3000郵便屋だ"},
+                {"id": "c2", "kind": "narration", "text": "ええと、切手は"},
+                {"id": "c3", "kind": "narration", "text": "切手帳を閉じる"},
+            ]
+            _write_job(dirs, "old", rows)
+            cached = ["啊是邮递员", "啊" * 500, "合上集邮册"]
+            (dirs["sakura_work"] / "old.checkpoint.jsonl").write_text(
+                "".join(
+                    json.dumps({"unit_key": runner.make_unit_key("narration", None, r["text"]), "zh_cn": c}) + "\n"
+                    for r, c in zip(rows, cached)
+                ),
+                encoding="utf-8",
+            )
+            table = {"えっ": "啊", "郵便屋だ": "是邮递员", "ええと、切手は": "那个，邮票呢"}
+            buf = io.StringIO()
+            with _reply_server(lambda lines, n: ("\n".join(table[x] for x in lines), "stop")) as (api, prompts), \
+                    mock.patch("sys.stdout", buf):
+                rc = runner.main(["--drive-root", str(dirs["root"]), "--api-base", api, "--repair-only",
+                                  "--skip-gpu-check", "--manifest-wait", "0"])
+            self.assertEqual(rc, 0)
+            self.assertIn("cached=1 | todo=2", buf.getvalue())
+            self.assertNotIn("切手帳", "".join(prompts))
+            cn = [json.loads(x)["translation"]
+                  for x in (dirs["sakura_output"] / "old.zh_CN.jsonl").read_text("utf-8").splitlines()]
+            self.assertEqual(cn, ["啊_w!10,0,\u3000是邮递员", "那个，邮票呢", "合上集邮册"])
+
+    def test_unprotected_code_warning(self):
+        found = schema.find_unprotected_codes(
+            [{"text": "<color=red>赤</color>_w!10,0,{{TAG_0}}\\C[1]\\n"}]
+        )
+        self.assertEqual(sorted(found), ["</color>", "<color=red>", "\\n"])
+
+
+_MARK = "将下面的文本从日文翻译成简体中文："
+
+
+def _unit(text: str, wid: int = 1) -> dict:
+    return {
+        "unit_key": runner.make_unit_key("narration", None, text),
+        "wid": f"w{wid:06d}", "file": "f", "kind": "narration", "speaker": None, "text": text,
+    }
+
+
+def _write_job(dirs, job: str, rows: list) -> None:
+    inp = dirs["sakura_input"] / f"{job}.jsonl"
+    inp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    schema.atomic_write_json(schema.manifest_path_for(inp), schema.build_manifest(job, inp, len(rows)))
+
+
+@contextlib.contextmanager
+def _reply_server(reply):
+    """Mock SSE server. reply(source_lines, call_no) -> (text, finish_reason)."""
+    prompts: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            return
+
+        def do_POST(self):
+            req = json.loads(self.rfile.read(int(self.headers["Content-Length"])).decode("utf-8"))
+            block = req["messages"][-1]["content"].split(_MARK, 1)[1][1:]
+            prompts.append(block)
+            text, finish = reply(block.split("\n"), len(prompts))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for ev in ({"choices": [{"delta": {"content": text}}]},
+                       {"choices": [{"delta": {}, "finish_reason": finish}]}):
+                self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8"))
+            self.wfile.write(b"data: [DONE]\n\n")
+
+    srv = _ThreadedHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}/v1", prompts
+    finally:
+        srv.shutdown()
+        srv.server_close()
 
 
 if __name__ == "__main__":

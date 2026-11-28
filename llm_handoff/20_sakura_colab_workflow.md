@@ -1,10 +1,10 @@
 # 20 — Sakura Colab Workflow (`sakura-ollama-colab`)
 
 > **Branch:** `sakura-ollama-colab` (branched from `origin/sakura-ollama` at `a94c8fb`)
-> **Updated:** 2026-11-28 01:30 +08:00
-> **Agent:** Antigravity
-> **Model:** Gemini 4 Neon
-> **Status:** READY — Milestone 12 complete (Option A exit-code separation `0/1/2`, mid-run `llama-server` crash guard, 5x Drive FUSE checkpoint write retry, `gpu.log` resilience, C10/C11 hardening; verified across 18/18 offline tests + isolated 14,269-row `rc=2` & `rc=0` dry-runs + 0 sanitization hits)
+> **Updated:** 2026-11-28 (+08:00), Milestone 13
+> **Agent:** Claude Code (Milestone 13); Antigravity (Milestones 1-12)
+> **Model:** Claude Sonnet 5.5 (Milestone 13); Gemini 4 Neon (Milestones 1-12)
+> **Status:** Milestone 13 implemented and verified **offline only** (27/27 tests, real-data checks, fake-model dry run, hostile-model chaos runs). **Not tested on a live L4** (the operator currently has no test job). Ported by hand to `hymt2-heretic-colab`. Check git history for commit state. Where section 2 and section 2.5 disagree, **2.5 wins**.
 > **Session Postmortem & Full Context:** See [21_colab_session_postmortem.md](21_colab_session_postmortem.md) for the complete C1–C12 failure table, 10-item operator accountability log, F1–F11 review fixes, 9 permanent guardrails, and live Colab L4 specs.
 
 ---
@@ -85,6 +85,37 @@ Replace the `vast.ai` rental workflow for the Japanese -> Traditional Chinese Ga
    - `<job>.overrides.jsonl` (auto-discovered in `sakura/input/` or via `--overrides`) accepts `translation` / `zh_cn` / `override` keyed by `id`, `unit_key`, or `kind` + `speaker` + `text`, passing directly through `to_simplified` without GPU usage.
    - `sakura_colab.ipynb` defaults: `AUTO_DISCONNECT=True`, `DISCONNECT_ON_ERROR=False`, `IDLE_UNASSIGN_MINUTES=15`, `REPAIR_ONLY=False`, `TARGET_JOB=""`.
 
+### 2.5 Milestone 13: broken-output guards and the fallback ladder (supersedes older text above)
+
+**Why.** A ~31.9k-row production job reported `[PARTIAL]` with 47 failed units (72 rows), was repaired with overrides to `[DONE]`, and the delivered output still contained broken rows that had passed QA:
+
+| Defect | Count | Cause |
+|---|---|---|
+| Runaway repetition (single outputs up to ~2,000 chars from ~35-char sources) | ~50 rows | Model loops. The runner ignored `finish_reason`, had no length/repetition check, and used fixed `max_tokens` |
+| Inline control codes of the form `_<name>!<n>,<n>,` dropped or altered | 73 rows | Codes were not recognised as protected tokens (the SOP step converting them to `{{TAG_n}}` was skipped and nothing warned) |
+
+The model produced the bad text; the runner let it through. Evidence limits: `llama.log` records no generated text (it did show requests hitting the 4096-token slot limit with `truncated = 1`), and `failures.jsonl` had been removed by the successful repair, so the **per-unit failure reasons of the 47 units were never recorded**. Their source shapes (mostly moans / lone small-tsu lines, 3 split-quote lines) and replaying likely outputs through the validator are the basis for the diagnosis. History contamination (accepted runaway text re-entering the prompt) is inferred from the code and prompt token counts, not observed.
+
+**Behaviour now**
+1. **Truncation:** `chat_stream` raises `OutputTruncated` on `finish_reason=length`; it is never accepted and never retried as a transport error. `max_tokens` scales with source length (floor 64; caps 512 single, 1024 multi-segment single, 2048 batch).
+2. **Control codes** (`schema.CONTROL_CODE_RE`, `_name!n,n,`): units are split at code runs (with trailing full-width spaces) and newlines. The model never sees them; the runner re-inserts them byte-for-byte. All segments of a unit go in **one request** as separate lines (this replaces the one-request-per-line multiline path of 2.4.6). Batches are limited to 8 units **and** 8 lines. Validation adds `control_code_mismatch`, and language QA ignores codes (their letters are not English).
+3. **Runaway:** `too_long` (> 3x source + 20) and `repetition` (single-character run > max(24, 2 x source elongation + 4), where small/full kana, the long-vowel mark and small tsu count as one drawl; or a multi-character phrase looping 8+ times that the source does not). Kana runs longer than 6 are shortened **in the prompt only**.
+4. **Ladder:** batch (2 temps) -> split halves -> single unit (3 tries) -> each segment alone (3 tries) -> `interjection_fallback` (only for vowel / n / small-tsu segments, only after the model actually answered, never on transport errors; flag `rule_fallback`) -> **keep the Japanese source**.
+5. **Cache revalidation:** every checkpoint row is checked against the current validators on load **and** at final assembly. Bad rows are not reused.
+6. **DONE rule:** `[DONE]` + `.DONE.json` when kept-source rows <= floor(total x 0.001) (`--max-untranslated-ratio`; operator-approved) and `missing = no_cjk = latin_only = 0`. Otherwise `[PARTIAL]` (`rc=2`). Any kept unit whose last error is a transport error (`transport_failed_units`) **blocks DONE even inside the limit**, so a server dying near the end of a job cannot be signed off. Below 1,000 records the limit is 0. `qa.failures` now equals `kept_source_units` and **may be non-zero in a DONE job**. A >1% rule-fallback share prints a warning.
+7. **Diagnostics:** `work/<job>.attempts.jsonl` (append-only, never deleted) stores every rejected request with errors and the raw reply (4,000-char cap). `output/<job>.review.jsonl` (always written, covered by DONE, copied by `pull`) lists `kept_source` and `rule_fallback` units; it can be used as `overrides.jsonl` after filling `translation` (unfilled kept-source rows are ignored).
+8. **`--assemble-only`:** rebuild outputs from checkpoint + overrides with no server and no model calls (replaces the fake `--api-base http://127.0.0.1:9/v1` trick).
+9. **`drive_bridge.py`:** `validate`/`push` warn about markup-like tokens that are not protected; `status`/`pull` surface review counts.
+
+**Offline verification**
+- `test_all.py`: 27/27. Two older tests were changed on purpose (segments share a request; a bad cached row is now rejected instead of reported as `no_cjk`).
+- Real data: split/reassemble is lossless on all 31,896 inputs and no segment contains a control code. On 31,541 previously accepted model rows the new validators reject exactly the 79 rows identified as bad by the earlier length/tag audit and nothing else. (The first versions wrongly rejected 69 legitimate long drawls; fixed.) This does not show that other, subtler bad translations are caught.
+- Old checkpoint + `--assemble-only`, no overrides: 78 units rejected, 151 rows pending, correctly `[PARTIAL]`.
+- Chaos runs (5 seeds, real input, ~19k requests each; random truncation, loops, line-count errors, dropped quotes/hearts, extra codes, HTTP 500, permanently untranslatable lines): no invariant violation - no invalid row delivered or cached, control codes identical, kept rows byte-exact, DONE rule consistent.
+- Fake-model full run (29,540 units): `[DONE]`, no unit rejected by pipeline plumbing, control codes identical on every row, no code in any prompt. Batch requests rise from about 3,687 to 4,379 for a full run (more, smaller lines).
+
+**Not verified:** live L4 behaviour, how often the real model still loops or fails, translation quality of segmented lines (segments may split a sentence), throughput impact. Segments without control codes or newlines are **not** split further at punctuation.
+
 ---
 
 ## 3. Progress Log
@@ -103,6 +134,7 @@ Replace the `vast.ai` rental workflow for the Japanese -> Traditional Chinese Ga
 | 2026-11-28 00:50 | Milestone 10: Stable `unit_key`, Quote/Placeholder/Multiline Repair, Language QA & `--repair-only` (C10) | Done | Live Run #5 completed the 1,808-row validation job (`24.2 tok/s`, 92-100% L4 util); a subsequent 14,269-row (`2,235` unique-unit) production job finished `2,215` units (`24.1 tok/s`) with `20` residual failures (`46` missing rows) + `12` undetected `no_cjk` / English outputs (`5` verbatim command-example lines + `7` untranslated/truncated lines). Implemented SHA-1 `unit_key` + legacy `wid` migration, generalized `repair_quotes`, internal `⟦0⟧` placeholder encode/decode, `overrides.jsonl` + kana glossary substitution, `\n` multiline segment split/rejoin, `no_cjk`/`latin_only` QA + allowlist, `--repair-only`/`--job`/`--overrides`, actionable `failures.jsonl`, and `IDLE_UNASSIGN_MINUTES=15` + `STOP THE RUNTIME NOW` safeguard. Added 9 test suites (`15/15` passing), verified isolated 14,269-row repair dry-run (`cached=2215 | todo=20`), 0 sanitization hits |
 | 2026-11-28 01:00 | Milestone 11: Real-Data Regex & Validator False-Positive Fixes (C11) | Done | Auditing all validators/regexes against all 14,269 real translated rows revealed: (1) `_KANA_RE` (`\u30a0-\u30ff`) falsely flagged katakana middle dot `・` (`U+30FB`) and prolonged mark `ー` (`U+30FC`) as `residual_kana` in 9 valid rows; (2) `normalize_output_line` collapsed multiple leading `\u3000` indents to 1 across 60 multi-indent rows; (3) `repair_quotes` missed `《》` / `【】` title-quote repairs. Narrowed `_KANA_RE` / `_JA_PRESENT_RE` to real kana letters, preserved exact leading `\u3000` count (verified idempotent), added `《》` / `【】` quote repair, and confirmed 0 errors & 0 non-indent unintended mutations across all 14,269 real rows |
 | 2026-11-28 01:30 | Milestone 12: Option A Exit-Code Separation (`0/1/2`) & FUSE I/O Resilience (C12) | Done | Separated `EXIT_OK = 0`, `EXIT_FATAL = 1`, `EXIT_PARTIAL = 2` so completed runs with minor residual failures save all outputs, skip `.DONE.json`, print calm `[PARTIAL]` summary in `sakura_colab.ipynb` (no red `RuntimeError`), and still honor `AUTO_DISCONNECT=True`; added `proc.poll() is not None` mid-run server crash guard, 5-attempt exponential-backoff `_append_checkpoint_rows` (committing `done_map` post-write), and `gpu.log` `OSError` warning isolation. Verified 18/18 tests + isolated 14,269-row `rc=2` & `rc=0` dry-runs + 0 sanitization hits |
+| 2026-11-28 | Milestone 13: broken-output guards, control-code segmentation, fallback ladder, 0.1% DONE rule | Done offline | See 2.5. Late fix: transport failures block DONE; `drive_bridge` no longer lists `*.overrides.jsonl` as a job. 27/27 tests, real-data check, dry run, chaos runs. Live L4 pending; ported to hymt2 |
 
 ---
 
@@ -133,15 +165,19 @@ Replace the `vast.ai` rental workflow for the Japanese -> Traditional Chinese Ga
 
 > **Standalone instructions export:** Every export to `<instructions_dir>/sakura-ollama-colab/` must bundle all **11 files** (the 9 files under `deploy/colab-sakura/` plus `20_sakura_colab_workflow.md` and `21_colab_session_postmortem.md`).
 
+### Next steps (as of Milestone 13)
+1. Live L4 `--repair-only` run on the affected job to retranslate the rejected/pending units; then read `review.jsonl` and `attempts.jsonl`.
+2. The hymt2 port was done on 2026-11-28 **before** any live run (the operator could not test and asked for both branches to be finished; this changed the earlier plan to wait for L4). Treat both branches as live-unverified. When a defect appears, fix it here first, verify, then port by hand (no `git merge`; separate directories).
+
 ### Incremental Repair & `rc = 0` / `rc = 2` Recovery Playbook
 1. **`rc = 2` (`[PARTIAL]`) 0-GPU local assembly (fastest when `todo == 0`):**
    - Inspect `sakura/work/<job>.failures.jsonl` (`unit_key`, `errors`, `expected_placeholders`, `suggested_fix`) and `sakura/output/<job>.qa_report.json`.
    - Write fixed lines into `sakura/input/<job>.overrides.jsonl` (keyed by `id`, `unit_key`, or `kind` + `speaker` + `text` with `"translation": "..."`).
    - Run locally with zero GPU usage to rebuild outputs and emit `<job>.DONE.json` (`rc = 0`):
-     `python <instructions_dir>/runner.py --drive-root "<drive_root>" --api-base http://127.0.0.1:9/v1 --repair-only --job <job> --skip-gpu-check --manifest-wait 0`
+     `python <instructions_dir>/runner.py --drive-root "<drive_root>" --assemble-only --job <job> --manifest-wait 0`
 2. **`rc = 2` Colab L4 incremental repair (when model retranslation is needed):**
    - Update `sakura/glossary.json` and/or partial `<job>.overrides.jsonl`, set `REPAIR_ONLY = True` and `TARGET_JOB = "<job>"` in latest `sakura_colab.ipynb`, and run `Ctrl+F9`. Cached units stay untouched.
 3. **`rc = 0` (`[DONE]`) post-completion adjustment / retest:**
    - **Targeted overrides (0 GPU):** Add lines to `<job>.overrides.jsonl` and run the `--repair-only --skip-gpu-check` command above (`--repair-only` bypasses `.DONE.json` skip and re-signs `.DONE.json`), or post-process local `.zh_TW.jsonl`.
    - **Force GPU retranslation of specific units / full volume:** Delete matching rows (or the entire file) from `sakura/work/<job>.checkpoint.jsonl`, then rerun Colab with `FORCE_RERUN = True` (or `REPAIR_ONLY = True`). Unchanged `.DONE.json` reruns with defaults cleanly skip and return `0`.
-4. Verify `missing == 0 and failures == 0 and no_cjk == 0 and latin_only == 0` and `<job>.DONE.json` SHA-256 passes before `pull`, then execute Step 7 Drive cleanup.
+4. Verify `missing == 0 and no_cjk == 0 and latin_only == 0`, check `kept_source_rows` / `rule_fallback_rows` against `<job>.review.jsonl`, and confirm `<job>.DONE.json` SHA-256 before `pull`; then execute Step 7 Drive cleanup.

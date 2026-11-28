@@ -31,7 +31,7 @@
    - 含 `\n` 的多行單元自動依 `\n` 拆段各自翻成單行、驗段數後再以 `\n` 接回與整句驗證。
 7. **日文 Galgame 簡轉繁預設使用 OpenCC `s2t`（非 `s2twp`）**：依過往多輪交接裁定，`s2t` 可避免把名詞硬換成奇怪台灣詞彙，並強制產出一對多字監控（`发/后/里/面/干/只/系/制/准/复/历/尽/获/钟`）與 `t2s(s2t(x)) == x` roundtrip 報告。
 8. **編碼與換行鐵律**：讀 JSON/JSONL 一律 `utf-8-sig`（防 PowerShell BOM），寫檔一律 UTF-8 無 BOM + `\n`（防 `\r\r\r\r\n`），**禁止透過 PowerShell heredoc 傳中文給 Python**。
-9. **成敗與語言 QA 鐵律**：只認 `.DONE.json` SHA-256 與 `qa_report.json`，必須同時滿足 **`missing=0`、`failures=0`、`no_cjk=0`、`latin_only=0`**（純數字及原文逐字出現的 ASCII 指令列入放行白名單，純英文譯文如 `New Game` 與正文被吞輸出會直接攔下，不寫 `.DONE.json`）。
+9. **成敗與語言 QA 鐵律**：只認 `.DONE.json` SHA-256 與 `qa_report.json`。`[DONE]` 條件：**`missing=0`、`no_cjk=0`、`latin_only=0`，且保留日文的列數 `kept_source_rows` ≤ 總列數 × 0.1%**（無條件捨去；少於 1000 列時上限為 0）。有任何單元是因連線／server 問題沒翻到時（`transport_failed_units`），即使在上限內也不寫 `.DONE.json`，需用 `REPAIR_ONLY` 重跑。**`[DONE]` 不代表全部翻完**：拉回後必須回報 `kept_source_rows`／`rule_fallback_rows` 並檢查 `<job>.review.jsonl`。另會擋下截斷輸出、失控重複、過長譯文與控制碼不符。
 10. **穩定斷點與測試安全**：checkpoint 一律以 SHA-1 `unit_key`（相容遷移舊版只有 `wid` 的檔案）為鍵，新增 `override` 或編輯不會讓已翻句位錯亂；本地單元測試一律使用暫存目錄。
 
 ---
@@ -84,6 +84,8 @@ python deploy/colab-sakura/drive_bridge.py doctor
 | `override` | 選填，字串或 `null`。已人工定稿的單元填入此欄（不送 GPU，直接透傳進輸出與 `s2t`）。 |
 | **禁出未知欄位** | 欄位白名單以外的任何 key 都會導致驗證失敗。 |
 
+**行內控制碼：** `_名稱!數字,數字,` 形式（例如 `_w!10,0,`）會由 runner 自動切開保護，可原樣保留在 `text`。**其他格式的控制碼仍必須先換成 `{{TAG_n}}`**。`validate`／`push` 若印出 `WARNING: markup-like tokens`，先處理或確認它們是一般文字，再推送。
+
 `glossary.json` 格式：支援 `{"src": "dst"}` 或 `[{"src": "...", "dst": "...", "note": "..."}]`（runner 送模型前會自動 `t2s` 轉簡體）。
 
 ### Phase 2：本機驗證 → 推送雲盤 → 交棒使用者
@@ -106,7 +108,7 @@ python deploy/colab-sakura/drive_bridge.py doctor
 3. 啟動 `llama-server`（ctx `16384`, `-np 4`, `-ngl 999`, `--device CUDA0 --cont-batching -lv 4`），檢查日誌 `offloaded X/X layers to GPU` 且實佔 VRAM >= `12,000 MiB`。
 4. 執行 3 句 Gate 並要求生成速度 `>= 8.0 tok/s`。
 5. 以 `(kind, speaker, text)`（SHA-1 `unit_key`）去重並載入 checkpoint（相容舊版 `wid` 遷移），優先套用 `override` 欄位與 `<job>.overrides.jsonl`（直接走 `t2s` 透傳、免經 GPU），其餘分 4 路並行送 batch 8 翻譯；單句失敗會依錯誤類型僅在 `system` prompt 加入針對性重試指示（`user` prompt 尾端永遠維持官方原文格式），無法解決的句子寫入含 `unit_key`、`attempts`、`expected_placeholders`、`observed_placeholders`、`suggested_fix` 的 `work/<job>.failures.jsonl`。
-6. 當 `missing=0`、`failures=0`、`no_cjk=0`、`latin_only=0` 全數通過時才寫入 `output/<job>.DONE.json` 並回傳結束碼 **`0`（`EXIT_OK`）**；若全數單元已跑完、譯文／`checkpoint.jsonl`／`failures.jsonl` 均已寫入但仍有少數未通過項目（且 `llama-server` 未崩潰）則**不寫 `.DONE.json`** 並回傳結束碼 **`2`（`EXIT_PARTIAL`）**，Notebook 僅印出平靜的 `[PARTIAL]` 摘要、不拋 `RuntimeError`、同步 Drive 後照 `AUTO_DISCONNECT=True` 自動釋放 L4 省點數。唯有啟動 Gate 0–4、輸入檔異常、`checkpoint.jsonl` 連續 I/O 失敗或推論中 `llama-server` 意外終止才會回傳/拋錯 **`1`（`EXIT_FATAL`）**，`finally` 先 sync 日誌並 `drive.flush_and_unmount()`，且預設 `DISCONNECT_ON_ERROR=False` 會印出 `STOP THE RUNTIME NOW` 並於 `IDLE_UNASSIGN_MINUTES=15` 後自動釋放 GPU 防呆（中途寫入 `checkpoint.jsonl` 具 5 次指數退避重試，`gpu.log` 寫入失敗僅警告不中斷）。
+6. 單元翻不過時依序降級：單句重試 → 逐段重試 → 純呻吟／促音段落用固定對照表（僅在模型有回應時，標記 `rule_fallback`）→ **保留日文原文**。每次被退回的模型回覆都存入 `work/<job>.attempts.jsonl`；待檢查項目寫入 `output/<job>.review.jsonl`。符合第二節第 9 條的條件才寫 `output/<job>.DONE.json` 並回傳 **`0`（`EXIT_OK`）**；否則（超過上限等，且 `llama-server` 未崩潰）不寫 `.DONE.json`、回傳 **`2`（`EXIT_PARTIAL`）**，Notebook 僅印出 `[PARTIAL]` 摘要、不拋 `RuntimeError`、同步 Drive 後照 `AUTO_DISCONNECT=True` 釋放 L4。啟動 Gate 0–4、輸入檔異常、`checkpoint.jsonl` 連續 I/O 失敗或 `llama-server` 意外終止才回傳 **`1`（`EXIT_FATAL`）**，`finally` 先 sync 日誌並 `drive.flush_and_unmount()`，預設 `DISCONNECT_ON_ERROR=False` 會印出 `STOP THE RUNTIME NOW` 並於 `IDLE_UNASSIGN_MINUTES=15` 後自動釋放 GPU。舊 checkpoint 中通不過現行檢查的列不會沿用。
 
 ### Phase 4：狀態檢查 → 增量修復（若需）→ 拉回驗證
 使用者告知 Colab 跑完（`[DONE]` 或 `[PARTIAL]` 皆已自動存檔並釋放 L4）後：
@@ -114,29 +116,29 @@ python deploy/colab-sakura/drive_bridge.py doctor
    ```powershell
    python deploy/colab-sakura/drive_bridge.py status --name game_ch01
    ```
-   - 若回傳 `[DONE]`：確認 `done_verified: true` 且 `failures: 0`、`qa.missing: 0`、`qa.no_cjk: 0`。
-   - **若 Colab 顯示 `[PARTIAL]`（`rc = 2`）或 `status` 顯示 `failures > 0` / `qa.no_cjk > 0`，請進行增量修復（絕不重翻已完成單元）：**
-     1. 檢視 `<Drive>\...\sakura\work\game_ch01.failures.jsonl` 內的 `errors`、`expected_placeholders` 與 `suggested_fix`，以及 `sakura/output/game_ch01.qa_report.json`。
-     2. 可將外來語專有名詞補充到 `glossary.json`，或直接建立 `sakura/input/game_ch01.overrides.jsonl`（每行含 `"translation"` 及 `"id"` / `"unit_key"` / `"kind"+"speaker"+"text"`）。
-     3. **若剩餘失敗句已全數寫進 `overrides.jsonl`（`todo = 0`），直接在本機 0 GPU 重組並寫出 `.DONE.json`（免開 Colab L4）：**
+   - 若回傳 `[DONE]`：確認 `done_verified: true`、`qa.missing: 0`、`qa.no_cjk: 0`，並向使用者回報 `kept_source_rows` 與 `rule_fallback_rows`。
+   - **若 Colab 顯示 `[PARTIAL]`（`rc = 2`），或想補齊 `[DONE]` 任務的待檢查列，請做增量修復（通過檢查的單元不重翻）：**
+     1. 檢視 `sakura/output/<job>.review.jsonl`；需要看模型實際回覆時查 `sakura/work/<job>.attempts.jsonl`。
+     2. 可補 `glossary.json`，或把 `review.jsonl` 另存為 `sakura/input/<job>.overrides.jsonl` 並填入 `translation`（未填的 `kept_source` 列會忽略；也可自行用 `"translation"` 加 `"id"` / `"unit_key"` / `"kind"+"speaker"+"text"`）。人工譯文不經自動檢查，控制碼須自行保留。
+     3. **只想用現有快取加人工譯文重組（免開 Colab、不呼叫模型）：** 仍保留日文的列數在上限內即寫出 `.DONE.json`。
         ```powershell
-        python <instructions_dir>/runner.py --drive-root "<drive_root>" --api-base http://127.0.0.1:9/v1 --repair-only --job game_ch01 --skip-gpu-check --manifest-wait 0
+        python <instructions_dir>/runner.py --drive-root "<drive_root>" --assemble-only --job game_ch01 --manifest-wait 0
         ```
      4. **若仍需模型重翻部分失敗句**：在 Colab 最新版 `sakura_colab.ipynb` 勾選 `REPAIR_ONLY = True`、`TARGET_JOB = "game_ch01"` 重跑——runner 會保留已成功的快取譯文完全不動，僅補翻缺漏／失敗單元並重算 QA。
 2. **`rc = 0`（`[DONE]`）事後恢復與局部補測速查表：**
    | 情境 | 處置方式 | 要開 GPU 嗎？ |
    |---|---|---|
    | 誤按重跑且未改動 | 維持預設 `FORCE_RERUN=False, REPAIR_ONLY=False`，偵測有效 `.DONE.json` 直接 `skipping` 回 `rc = 0` | 不重翻 |
-   | 事後改少數特定句 | 寫入 `sakura/input/<job>.overrides.jsonl` 後跑上述本機 `--repair-only --skip-gpu-check`（`--repair-only` 會繞過 `.DONE.json` 跳過並重簽） | **0 GPU** |
+   | 事後改少數特定句 | 寫入 `sakura/input/<job>.overrides.jsonl` 後跑上述本機 `--assemble-only`（會重簽 `.DONE.json`） | **0 GPU** |
    | 強制 GPU 重翻特定句 / 整本 | 刪除 `sakura/work/<job>.checkpoint.jsonl` 對應行（或整份 checkpoint），開 Colab 勾 `FORCE_RERUN = True`（或 `REPAIR_ONLY = True`）重跑 | 只翻刪掉的句 |
 3. 拉回本機（強制核對 `.DONE.json` 所有檔案 SHA-256 及 `id` 順序 100% 一致）：
    ```powershell
    python deploy/colab-sakura/drive_bridge.py pull --name game_ch01 --dest work/translated
    ```
-4. 檢查 `work/translated/game_ch01.qa_report.json` 的 `manual_overrides`、`repaired`、`roundtrip_mismatches` 與 `watch_chars` 一對多字清單，再接續原本的遊戲資產寫回與本地 E2E 測試。
+4. 檢查 `work/translated/game_ch01.review.jsonl`，以及 `qa_report.json` 的 `kept_source_rows`、`rule_fallback_rows`、`manual_overrides`、`repaired`、`roundtrip_mismatches` 與 `watch_chars`，再接續遊戲資產寫回與本地 E2E 測試。
 
 ### Phase 4.5：拉回驗證通過後的雲盤殘留清理（必做）
-1. **僅在確認** `drive_bridge.py pull` 成功、所有 `.zh_TW.jsonl` / `.zh_CN.jsonl` / `.qa_report.json` / `.DONE.json` 已完整保存於本機工作區（且寫回或備份完成）**之後**，才能清理雲盤。
+1. **僅在確認** `drive_bridge.py pull` 成功、`.zh_TW.jsonl` / `.zh_CN.jsonl` / `.qa_report.json` / `.review.jsonl` / `.DONE.json` 已完整保存於本機（且寫回或備份完成；需要診斷時先另存 `attempts.jsonl`）**之後**，才能清理雲盤。
 2. 清理目標**僅限本次已完成任務**位於雲端硬碟目錄下的殘留檔：`sakura/input/`、`sakura/work/`、`sakura/output/`（以及若不再沿用之任務專屬 `sakura/glossary.json`），避免下一款遊戲啟動 Colab 時掃描到舊任務殘留、造成錯誤或重複執行。
 3. **絕對不可刪除**共用的 `models/`、`bin/` 與 `scripts/`。
 

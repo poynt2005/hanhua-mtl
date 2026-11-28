@@ -27,14 +27,14 @@
    python deploy/colab-sakura/drive_bridge.py push --input work/game.jsonl --glossary work/glossary.json --name game_01
    ```
 2. **你打開 `sakura_colab.ipynb`（確認選 L4 GPU）→ 按 `Ctrl+F9`：**
-   - **Notebook 結束碼與斷線行為（方案 A）：** `rc = 0`（`[DONE]` 100% 通過並寫入 `.DONE.json` → 自動釋放 L4）；`rc = 2`（`[PARTIAL]` 全部句子皆已跑完並存檔至 `checkpoint.jsonl`/`failures.jsonl`，僅剩少數待補句 → **不噴紅字、不寫 `.DONE.json`、同步 Drive 後直接照 `AUTO_DISCONNECT=True` 自動釋放 L4 省點數**）；`rc = 1`（僅啟動 Gate 0–4／硬體／中途 server 崩潰才會拋錯並依 `DISCONNECT_ON_ERROR = False` 保留 L4 最多 `IDLE_UNASSIGN_MINUTES = 15` 分鐘除錯）。僅需補翻剩餘失敗句時可勾選 `REPAIR_ONLY = True` 並填 `TARGET_JOB`。
-   - **Colab 端完全不含任何編譯流程**，直接完成：從 Drive `bin/` 解壓預編譯 `llama-server-l4-b12019.tar.gz`（若缺失則從 GitHub Release 秒速下載並驗證 SHA-256 後寫回 Drive `bin/`）→ 模型複製到本地 SSD → **GPU 4 道硬鎖檢查**（拒跑 T4、驗證 100% 層數進 GPU、VRAM >= 12 GB、3 句 Gate >= 8 tok/s）→ 4 路並行 batch 8 翻譯＋SHA-1 `unit_key` 斷點續傳（含 Drive FUSE 5 次寫檔防抖重試、引號/佔位符/假名術語表/換行拆段修復、`<job>.overrides.jsonl` 透傳與 `no_cjk`/`latin_only` 語言 QA）→ `s2t` 簡轉繁與 QA → 視結果回傳 `0` / `2` → `flush_and_unmount()` → 自動斷線釋放 L4。
+   - **Notebook 結束碼與斷線行為：** `rc = 0`（`[DONE]`：寫入 `.DONE.json` → 自動釋放 L4；翻不出而保留日文的列數不超過 0.1%，摘要會列出待檢查數量）；`rc = 2`（`[PARTIAL]`：全部跑完並存檔，但保留日文超過上限等 → 不噴紅字、不寫 `.DONE.json`、同步 Drive 後照 `AUTO_DISCONNECT=True` 釋放 L4）；`rc = 1`（僅啟動 Gate 0–4／硬體／中途 server 崩潰才拋錯，依 `DISCONNECT_ON_ERROR = False` 保留 L4 最多 `IDLE_UNASSIGN_MINUTES = 15` 分鐘除錯）。補翻可勾選 `REPAIR_ONLY = True` 並填 `TARGET_JOB`。
+   - **Colab 端完全不含任何編譯流程**，直接完成：從 Drive `bin/` 解壓預編譯 `llama-server-l4-b12019.tar.gz`（若缺失則從 GitHub Release 下載並驗證 SHA-256 後寫回）→ 模型複製到本地 SSD → **GPU 4 道硬鎖檢查** → 4 路並行翻譯＋`unit_key` 斷點續傳（控制碼切開保護、截斷／失控重複檢查、引號／佔位符／假名術語表修復、`<job>.overrides.jsonl` 透傳、語言 QA）→ 翻不出時逐段重試、呻吟固定對照表、最後保留日文並列入 `<job>.review.jsonl` → `s2t` 簡轉繁 → 回傳 `0` / `2` → `flush_and_unmount()` → 自動斷線。
 3. **本機 Agent 驗收並拉回結果：**
    ```powershell
    python deploy/colab-sakura/drive_bridge.py status --name game_01
    python deploy/colab-sakura/drive_bridge.py pull --name game_01 --dest work/translated
    ```
-   *(若仍有個別專有名詞/殘餘失敗，檢視 `sakura/work/<job>.failures.jsonl` 並放入 `sakura/input/<job>.overrides.jsonl`，用 `REPAIR_ONLY = True` 只補翻該部分即可，已完成單元 100% 不重複翻。)*
+   *(`[DONE]` 也請看 `<job>.review.jsonl`：裡面是保留日文與固定規則補上的句子。填好 `translation` 另存為 `sakura/input/<job>.overrides.jsonl`，本機跑 `runner.py --assemble-only` 即可重組，免開 GPU。模型每次被退回的回覆在 `sakura/work/<job>.attempts.jsonl`。)*
 
 ---
 
@@ -49,4 +49,4 @@
 | `drive_bridge.py` | 本機 Windows Agent 專用雲盤橋接 CLI（`doctor`/`validate`/`push`/`status`/`pull`） |
 | `AGENT_SOP_COLAB.md` | 給已讀過 `vast.ai` 過往範例的 Agent 看的完整遷移 SOP |
 | `skill/SKILL.md` | 可攜式 Agent Skill 定義 |
-| `test_all.py` | 完整離線單元與整合測試（18 項，含嚴格 Prompt Mock SSE、引號/佔位符/多行修復、語言 QA、`--repair-only`、結束碼 `0/1/2` 與 Drive FUSE 重試） |
+| `test_all.py` | 離線單元與整合測試（27 項，含嚴格 Prompt Mock SSE、截斷／重複／控制碼防護、降級流程、0.1% 門檻、`--assemble-only`、結束碼 `0/1/2` 與 Drive FUSE 重試） |

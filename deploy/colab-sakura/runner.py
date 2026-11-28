@@ -60,6 +60,11 @@ EXIT_FATAL = 1
 EXIT_PARTIAL = 2
 CHECKPOINT_WRITE_RETRIES = 5
 CHECKPOINT_RETRY_BASE_DELAY = 0.25
+DEFAULT_MAX_UNTRANSLATED_RATIO = 0.001
+RULE_FALLBACK_WARN_RATIO = 0.01
+MAX_LINES_PER_BATCH = 8
+PROMPT_MAX_KANA_RUN = 6
+ATTEMPT_RAW_LIMIT = 4000
 
 SYSTEM_PROMPT = (
     "你是一个视觉小说翻译模型，可以通顺地使用给定的术语表以指定的风格将日文翻译成简体中文，"
@@ -85,6 +90,24 @@ _SPACED_PH_RE = re.compile(r"\u27e6\s*(\d+)\s*\u27e7")
 _PUNCT_STRIP_RE = re.compile(r"[「」『』\"'‘’“”（）()\[\]…・！？!?、。，．—─ー~～]+")
 _PURE_NUM_SYM_RE = re.compile(r"^[0-9.,:;/+\-_%#]+$")
 _ASCII_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]*")
+# Split points the model never sees: control-code runs (with trailing full-width spaces) and newlines.
+_SEPARATOR_RE = re.compile(r"((?:(?:" + schema.CONTROL_CODE_RE.pattern + r")　*|\n)+)")
+_LONG_KANA_RUN_RE = re.compile(r"([ぁ-ゖァ-ヺー])\1{%d,}" % PROMPT_MAX_KANA_RUN)
+_CHAR_RUN_RE = re.compile(r"([぀-ヿ一-鿿A-Za-z])\1*")
+_PHRASE_LOOP_RE = re.compile(r"([぀-ヿ一-鿿][^\n]{1,7}?)\1{7,}")
+_INTERJECTION_MAP = {
+    **dict.fromkeys("ぁあァア", "啊"),
+    **dict.fromkeys("ぃいィイ", "咿"),
+    **dict.fromkeys("ぅうゥウ", "呜"),
+    **dict.fromkeys("ぇえェエ", "诶"),
+    **dict.fromkeys("ぉおォオ", "哦"),
+    **dict.fromkeys("んン", "嗯"),
+}
+_SOKUON = "っッ"
+# Small and full-size kana are one drawn-out sound; ー and っ extend it.
+_SMALL_TO_FULL = str.maketrans("ぁぃぅぇぉァィゥェォ", "あいうえおアイウエオ")
+_ELONGATION_RE = re.compile(r"([ぁ-ゖァ-ヺ一-鿿A-Za-z])(?:\1|[ーっッ])*")
+RUN_LIMIT_FLOOR = 24
 REPAIR_FLAG_PREFIXES = ("repair_", "trim_", "add_", "heart_norm", "glossary_subst")
 
 _CC_CACHE: dict[str, Any] = {}
@@ -418,6 +441,14 @@ def _http_get_json(url: str, timeout: float = 5.0) -> tuple[int, Any]:
         return resp.status, json.loads(raw) if raw else {}
 
 
+class OutputTruncated(Exception):
+    """The server stopped at a token limit, so the text is incomplete."""
+
+    def __init__(self, text: str):
+        super().__init__("output truncated (finish_reason=length)")
+        self.text = text
+
+
 def chat_stream(
     api_base: str,
     model: str,
@@ -447,6 +478,7 @@ def chat_stream(
         pieces: list[str] = []
         chunk_tokens = 0
         usage_tokens: int | None = None
+        finish_reason: str | None = None
         try:
             req = urllib.request.Request(
                 url,
@@ -475,6 +507,8 @@ def chat_stream(
                     choices = chunk.get("choices") or []
                     if not choices:
                         continue
+                    if choices[0].get("finish_reason"):
+                        finish_reason = choices[0]["finish_reason"]
                     delta = choices[0].get("delta") or {}
                     piece = delta.get("content")
                     if piece:
@@ -482,6 +516,8 @@ def chat_stream(
                         chunk_tokens += 1
             elapsed = max(0.001, time.monotonic() - t0)
             text = "".join(pieces)
+            if finish_reason == "length":
+                raise OutputTruncated(text)
             if not text:
                 raise RuntimeError("stream produced empty content")
             tokens = usage_tokens if usage_tokens and usage_tokens > 0 else max(chunk_tokens, len(text))
@@ -667,8 +703,105 @@ def decode_placeholders(text: str, tokens: list[str]) -> tuple[str, list[str]]:
     return _SPACED_PH_RE.sub(_restore, normalized), flags
 
 
+def compress_long_runs(text: str) -> str:
+    """Shorten very long kana runs in the PROMPT only; they push the model into repetition loops."""
+    return _LONG_KANA_RUN_RE.sub(lambda m: m.group(1) * PROMPT_MAX_KANA_RUN, text)
+
+
+def split_segments(text: str) -> list[tuple[bool, str]]:
+    """Split into (translatable, piece) parts; ''.join(pieces) always equals the input."""
+    parts: list[tuple[bool, str]] = []
+    for idx, piece in enumerate(_SEPARATOR_RE.split(text)):
+        if piece:
+            parts.append((idx % 2 == 0 and bool(_JA_PRESENT_RE.search(piece)), piece))
+    return parts
+
+
+def segment_units(unit: dict[str, Any]) -> list[dict[str, Any]]:
+    """One pseudo-unit per translatable segment; only the first keeps the speaker."""
+    texts = [piece for translatable, piece in split_segments(unit["text"]) if translatable]
+    return [
+        {**unit, "text": piece, "speaker": unit.get("speaker") if i == 0 else None}
+        for i, piece in enumerate(texts)
+    ]
+
+
+def assemble_segments(source: str, outputs: list[str]) -> str:
+    """Re-insert translated segments between the untouched source separators/literals."""
+    it = iter(outputs)
+    out: list[str] = []
+    for translatable, piece in split_segments(source):
+        if not translatable:
+            out.append(piece)
+            continue
+        tail = piece[len(piece.rstrip("　")):]
+        out.append(next(it).rstrip("　") + tail)
+    return "".join(out)
+
+
+def is_pure_interjection(text: str) -> bool:
+    """True when the only Japanese letters are moans/stutters: vowels, ん, っ (no kanji, no words)."""
+    body = schema.PLACEHOLDER_RE.sub("", schema.CONTROL_CODE_RE.sub("", text))
+    kana = _KANA_RE.findall(body)
+    if not kana or re.search(r"[一-鿿A-Za-z]", body):
+        return False
+    return all(ch in _INTERJECTION_MAP or ch in _SOKUON for ch in kana)
+
+
+def interjection_fallback(text: str) -> str | None:
+    """Last-resort deterministic rendering, used only after the model has failed."""
+    if not is_pure_interjection(text):
+        return None
+    has_vowel = any(ch in _INTERJECTION_MAP for ch in text)
+    out: list[str] = []
+    wrote_sokuon = False
+    for ch in text:
+        if ch in _INTERJECTION_MAP:
+            out.append(_INTERJECTION_MAP[ch])
+        elif ch in _SOKUON:
+            if not has_vowel and not wrote_sokuon:
+                out.append("唔")
+                wrote_sokuon = True
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _longest_run(text: str) -> int:
+    return max((len(m.group(0)) for m in _CHAR_RUN_RE.finditer(text)), default=0)
+
+
+def _source_elongation(text: str) -> int:
+    folded = text.translate(_SMALL_TO_FULL)
+    return max((len(m.group(0)) for m in _ELONGATION_RE.finditer(folded)), default=0)
+
+
+def _has_phrase_loop(text: str) -> bool:
+    """A multi-character phrase looping 8+ times; single-character drawls are judged by run length."""
+    return any(len(set(m.group(1))) > 1 for m in _PHRASE_LOOP_RE.finditer(text))
+
+
+def check_runaway(src_text: str, zh_cn: str) -> list[str]:
+    """Reject degenerate repetition and outputs far longer than their source."""
+    src = schema.CONTROL_CODE_RE.sub("", src_text or "")
+    out = schema.CONTROL_CODE_RE.sub("", zh_cn or "")
+    errs: list[str] = []
+    if len(out) > 3 * len(src) + 20:
+        errs.append("too_long")
+    if _longest_run(out) > max(RUN_LIMIT_FLOOR, 2 * _source_elongation(src) + 4):
+        errs.append("repetition")
+    elif _has_phrase_loop(out) and not _has_phrase_loop(src):
+        errs.append("repetition")
+    return errs
+
+
+def _max_tokens_for(units: list[dict[str, Any]], cap: int) -> int:
+    chars = sum(len(compress_long_runs(u["text"])) + len(u.get("speaker") or "") for u in units)
+    return min(cap, max(64, 2 * chars + 24 * len(units)))
+
+
 def _format_source_line(unit: dict[str, Any]) -> tuple[str, list[str]]:
-    encoded_text, tokens = encode_placeholders(unit["text"])
+    encoded_text, tokens = encode_placeholders(compress_long_runs(unit["text"]))
     spk = unit.get("speaker")
     if unit["kind"] == "dialogue" and spk:
         return f"{spk}：{encoded_text}", tokens
@@ -941,7 +1074,9 @@ def check_language_qa(
     allowlist: tuple[re.Pattern[str], ...] = (),
 ) -> list[str]:
     """Ensure Japanese-bearing units actually produce Chinese (no CJK / Latin-only failures)."""
-    if not _JA_PRESENT_RE.search(src_text or ""):
+    src_text = schema.CONTROL_CODE_RE.sub("", src_text or "")
+    zh_cn = schema.CONTROL_CODE_RE.sub("", zh_cn or "")
+    if not _JA_PRESENT_RE.search(src_text):
         return []
     if _CJK_RE.search(zh_cn or ""):
         return []
@@ -969,6 +1104,9 @@ def validate_unit_translation(
         errs.append("residual_kana")
     if schema.extract_placeholders(src_text) != schema.extract_placeholders(zh_cn):
         errs.append("placeholder_mismatch")
+    if schema.extract_control_codes(src_text) != schema.extract_control_codes(zh_cn):
+        errs.append("control_code_mismatch")
+    errs.extend(check_runaway(src_text, zh_cn))
     for ch in ("♥", "♡"):
         if src_text.count(ch) != zh_cn.count(ch):
             errs.append(f"heart_mismatch:{ch}")
@@ -989,9 +1127,13 @@ def run_preflight_gate(api_base: str, min_tps: float = DEFAULT_MIN_TPS) -> None:
         last_err: str | None = None
         cn = ""
         for temp in (0.3, 0.1, 0.0):
-            out, toks, elapsed = chat_stream(
-                api_base, MODEL_ALIAS, msgs, temperature=temp, top_p=0.8, max_tokens=512
-            )
+            try:
+                out, toks, elapsed = chat_stream(
+                    api_base, MODEL_ALIAS, msgs, temperature=temp, top_p=0.8, max_tokens=512
+                )
+            except OutputTruncated as exc:
+                last_err = f"Gate sample {idx} was truncated: {exc.text[:80]!r}"
+                continue
             lines = [ln for ln in out.splitlines() if ln.strip()]
             if len(lines) != 1:
                 last_err = f"Gate sample {idx} returned {len(lines)} lines: {out!r}"
@@ -1023,31 +1165,33 @@ def needs_translation(rec: dict[str, Any]) -> bool:
 
 
 def _split_batches(units: list[dict[str, Any]], max_batch: int = 8) -> list[list[dict[str, Any]]]:
-    """Group into batches <= max_batch, never mixing ui/system with story or batching multiline rows."""
+    """Group into batches of <= max_batch units and <= MAX_LINES_PER_BATCH lines; ui/system stay apart."""
     batches: list[list[dict[str, Any]]] = []
     cur: list[dict[str, Any]] = []
     cur_ui: bool | None = None
+    cur_lines = 0
     for u in units:
         is_ui = u["kind"] in ("ui", "system")
-        has_nl = "\n" in u["text"]
-        if has_nl:
-            if cur:
-                batches.append(cur)
-                cur = []
-                cur_ui = None
-            batches.append([u])
-            continue
-        if cur and (len(cur) >= max_batch or cur_ui != is_ui):
+        n_lines = max(1, len(segment_units(u)))
+        if cur and (len(cur) >= max_batch or cur_lines + n_lines > MAX_LINES_PER_BATCH or cur_ui != is_ui):
             batches.append(cur)
             cur = []
+            cur_lines = 0
         cur.append(u)
+        cur_lines += n_lines
         cur_ui = is_ui
     if cur:
         batches.append(cur)
     return batches
 
 
-def _hint_for_errors(errs: list[str]) -> str:
+def _hint_for_errors(errs: list[str], unit: dict[str, Any] | None = None) -> str:
+    if "truncated" in errs or "repetition" in errs or "too_long" in errs:
+        return "不要重复输出同一个字或词，译文长度应与原文相近，翻译完立即结束。"
+    if unit is not None and is_pure_interjection(unit["text"]) and (
+        "residual_kana" in errs or "no_cjk" in errs
+    ):
+        return "原文是呻吟或语气声，请用简体中文语气词表达（促音「っ」可译为“唔”），不要保留假名。"
     if "placeholder_mismatch" in errs:
         return "必须原样保留所有占位符标记（如⟦0⟧、⟦1⟧），不要删除、翻译、重复或调换顺序。"
     if "quote_asymmetry_mismatch" in errs:
@@ -1109,6 +1253,132 @@ def _process_model_line(
     return cn, raw_saved, all_flags, errs
 
 
+_ATTEMPT_SINK: Any = None
+
+
+def _record_attempt(units: list[dict[str, Any]], temp: float, errs: list[str], raw: str) -> None:
+    """Keep what the model actually returned for every rejected request."""
+    sink = _ATTEMPT_SINK
+    if sink is not None:
+        sink(
+            {
+                "unit_keys": sorted({u["unit_key"] for u in units if u.get("unit_key")}),
+                "sources": [u["text"] for u in units],
+                "temperature": temp,
+                "errors": errs,
+                "raw": raw[:ATTEMPT_RAW_LIMIT],
+                "raw_len": len(raw),
+            }
+        )
+
+
+def _attempt(
+    api_base: str,
+    units: list[dict[str, Any]],
+    glossary_cn: list[dict[str, str]],
+    history: list[str],
+    known_speakers_desc: list[str],
+    temp: float,
+    cap: int,
+    hint: str = "",
+) -> tuple[dict[str, tuple[str, str | None, list[str]]] | None, list[str], str]:
+    """One request for all segments of all units. Returns (ok_by_unit_key | None, errors, observed)."""
+    per_unit = [segment_units(u) for u in units]
+    flat = [seg for segs in per_unit for seg in segs]
+    matched = _match_glossary(units, glossary_cn)
+    msgs = build_sakura_messages(flat, glossary_cn, history, extra_system_hint=hint)
+    try:
+        raw, _, _ = chat_stream(
+            api_base,
+            MODEL_ALIAS,
+            msgs,
+            temperature=temp,
+            top_p=0.8,
+            max_tokens=_max_tokens_for(flat, cap),
+        )
+    except OutputTruncated as exc:
+        _record_attempt(units, temp, ["truncated"], exc.text)
+        return None, ["truncated"], exc.text
+    except Exception as exc:
+        errs = [f"transport:{exc}"]
+        _record_attempt(units, temp, errs, "")
+        return None, errs, ""
+
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    if len(lines) != len(flat):
+        errs = [f"line_count:{len(lines)}!={len(flat)}"]
+        _record_attempt(units, temp, errs, raw)
+        return None, errs, raw
+
+    parsed: dict[str, tuple[str, str | None, list[str]]] = {}
+    pos = 0
+    for unit, segs in zip(units, per_unit):
+        outputs: list[str] = []
+        raws: list[str] = []
+        flags: list[str] = []
+        unit_has_quotes = "「" in unit["text"] or "」" in unit["text"]
+        for seg in segs:
+            _, tokens = encode_placeholders(seg["text"])
+            cn, raw_saved, seg_flags, errs = _process_model_line(
+                lines[pos], seg, tokens, known_speakers_desc, matched
+            )
+            pos += 1
+            # A segment without quotes must not gain a wrapping pair when its unit tracks quotes.
+            if (
+                unit_has_quotes
+                and "「" not in seg["text"]
+                and "」" not in seg["text"]
+                and cn.startswith("「")
+                and cn.endswith("」")
+            ):
+                cn = cn[1:-1]
+                seg_flags = seg_flags + ["trim_outer_quote_pair"]
+                errs = validate_unit_translation(seg["text"], cn)
+            if errs:
+                _record_attempt(units, temp, errs, raw)
+                return None, errs, cn
+            outputs.append(cn)
+            raws.append(raw_saved if raw_saved is not None else cn)
+            flags.extend(f for f in seg_flags if f not in flags)
+        joined = assemble_segments(unit["text"], outputs)
+        errs = validate_unit_translation(unit["text"], joined)
+        if errs:
+            _record_attempt(units, temp, errs, raw)
+            return None, errs, joined
+        raw_joined = assemble_segments(unit["text"], raws) if raws != outputs else None
+        parsed[unit["unit_key"]] = (joined, raw_joined, flags)
+    return parsed, [], raw
+
+
+def _solve_with_retries(
+    api_base: str,
+    unit: dict[str, Any],
+    glossary_cn: list[dict[str, str]],
+    history: list[str],
+    known_speakers_desc: list[str],
+) -> tuple[tuple[str, str | None, list[str]] | None, list[str], str, int, bool]:
+    """Up to three requests. Returns (result, errors, observed, attempts, model_answered)."""
+    last_err: list[str] = ["unknown"]
+    last_obs = ""
+    hint = ""
+    answered = False
+    cap = 1024 if len(segment_units(unit)) > 1 else 512
+    schedule = ((0.3, True), (0.1, True), (0.0, False))
+    for idx, (temp, use_hist) in enumerate(schedule, start=1):
+        ok, errs, observed = _attempt(
+            api_base, [unit], glossary_cn, history if use_hist else [],
+            known_speakers_desc, temp, cap, hint,
+        )
+        if ok is not None:
+            return ok[unit["unit_key"]], [], observed, idx, True
+        last_err = errs
+        if not errs[0].startswith("transport:"):
+            answered = True
+            last_obs = observed
+        hint = _hint_for_errors(errs, unit)
+    return None, last_err, last_obs, len(schedule), answered
+
+
 def _translate_single_unit(
     api_base: str,
     unit: dict[str, Any],
@@ -1116,119 +1386,56 @@ def _translate_single_unit(
     history: list[str],
     known_speakers_desc: list[str],
 ) -> tuple[str | None, str | None, list[str], dict[str, Any] | None]:
-    matched = _match_glossary([unit], glossary_cn)
-    _, tokens = encode_placeholders(unit["text"])
-    schedule = ((0.3, True), (0.1, True), (0.0, False))
-    last_err: list[str] = ["unknown"]
-    last_obs = ""
-    attempts = 0
-    extra_hint = ""
-    for idx, (temp, use_hist) in enumerate(schedule):
-        attempts = idx + 1
-        msgs = build_sakura_messages(
-            [unit],
-            glossary_cn,
-            history if use_hist else [],
-            extra_system_hint=extra_hint,
-        )
-        try:
-            raw, _, _ = chat_stream(
-                api_base, MODEL_ALIAS, msgs, temperature=temp, top_p=0.8, max_tokens=512
+    """Fallback ladder: whole unit -> one segment at a time -> interjection rule -> give up."""
+
+    def _fail(errs: list[str], attempts: int, observed: str):
+        if "\n" in unit["text"]:
+            errs = ["multiline_failed"] + errs
+        return None, None, [], _build_failure_record(unit, errs, attempts, observed, glossary_cn)
+
+    result, errs, observed, attempts, answered = _solve_with_retries(
+        api_base, unit, glossary_cn, history, known_speakers_desc
+    )
+    if result is not None:
+        return result[0], result[1], result[2], None
+
+    segs = segment_units(unit)
+    outputs: list[str] = []
+    raws: list[str] = []
+    flags: list[str] = []
+    for seg in segs:
+        seg_result = None
+        if len(segs) > 1:
+            seg_result, errs, observed, used, answered = _solve_with_retries(
+                api_base, seg, glossary_cn, history, known_speakers_desc
             )
-        except Exception as exc:
-            last_err = [f"transport:{exc}"]
-            continue
-        lines = [ln for ln in raw.splitlines() if ln.strip()]
-        if len(lines) != 1:
-            last_err = [f"line_count:{len(lines)}!=1"]
-            last_obs = raw
-            continue
-        cn, raw_saved, flags, errs = _process_model_line(
-            lines[0], unit, tokens, known_speakers_desc, matched
-        )
-        if not errs:
-            return cn, raw_saved, flags, None
-        last_err = errs
-        last_obs = cn
-        extra_hint = _hint_for_errors(errs)
-    return None, None, [], _build_failure_record(unit, last_err, attempts, last_obs, glossary_cn)
+            attempts += used
+            if seg_result is not None and "segment_retry" not in flags:
+                flags.append("segment_retry")
+        if seg_result is None:
+            # Never let a dead/unreachable server turn into rule-generated "translations".
+            ruled = interjection_fallback(seg["text"]) if answered else None
+            if ruled is None or validate_unit_translation(seg["text"], ruled):
+                return _fail(errs, attempts, observed)
+            seg_result = (ruled, None, ["rule_fallback"])
+        outputs.append(seg_result[0])
+        raws.append(seg_result[1] if seg_result[1] is not None else seg_result[0])
+        flags.extend(f for f in seg_result[2] if f not in flags)
 
-
-def _translate_single_multiline(
-    api_base: str,
-    unit: dict[str, Any],
-    glossary_cn: list[dict[str, str]],
-    history: list[str],
-    known_speakers_desc: list[str],
-) -> tuple[str | None, str | None, list[str], dict[str, Any] | None]:
-    raw_segments = unit["text"].split("\n")
-    out_segments: list[str] = []
-    raw_segments_out: list[str] = []
-    agg_flags: list[str] = []
-    seg_hist = list(history)
-    total_attempts = 0
-    saw_first_nonempty = False
-
-    for seg in raw_segments:
-        if not seg.strip():
-            out_segments.append(seg)
-            raw_segments_out.append(seg)
-            continue
-        seg_unit = {
-            "unit_key": unit["unit_key"],
-            "wid": unit["wid"],
-            "file": unit["file"],
-            "kind": unit["kind"],
-            "speaker": unit.get("speaker") if not saw_first_nonempty else None,
-            "text": seg,
-        }
-        saw_first_nonempty = True
-        cn_seg, raw_seg, seg_flags, fail_rec = _translate_single_unit(
-            api_base, seg_unit, glossary_cn, seg_hist, known_speakers_desc
-        )
-        if fail_rec is not None or cn_seg is None:
-            total_attempts += fail_rec["attempts"] if fail_rec else 1
-            errs = ["multiline_failed"] + (fail_rec["errors"] if fail_rec else [])
-            obs = "\n".join(out_segments)
-            return None, None, [], _build_failure_record(unit, errs, total_attempts, obs, glossary_cn)
-        total_attempts += 1
-        out_segments.append(cn_seg)
-        raw_segments_out.append(raw_seg if raw_seg is not None else cn_seg)
-        for fl in seg_flags:
-            if fl not in agg_flags:
-                agg_flags.append(fl)
-        if unit["kind"] not in ("ui", "system"):
-            seg_hist = (seg_hist + [cn_seg])[-4:]
-
-    if len(out_segments) != len(raw_segments):
-        return (
-            None,
-            None,
-            [],
-            _build_failure_record(
-                unit,
-                ["multiline_failed", "segment_count_mismatch"],
-                total_attempts,
-                "\n".join(out_segments),
-                glossary_cn,
-            ),
-        )
-
-    joined = "\n".join(out_segments)
+    joined = assemble_segments(unit["text"], outputs)
     errs = validate_unit_translation(unit["text"], joined)
     if errs:
-        return (
-            None,
-            None,
-            [],
-            _build_failure_record(unit, ["multiline_failed"] + errs, total_attempts, joined, glossary_cn),
-        )
-    raw_joined = (
-        "\n".join(raw_segments_out)
-        if any(r != c for r, c in zip(raw_segments_out, out_segments))
-        else None
-    )
-    return joined, raw_joined, agg_flags, None
+        return _fail(errs, attempts, joined)
+    raw_joined = assemble_segments(unit["text"], raws) if raws != outputs else None
+    return joined, raw_joined, flags, None
+
+
+# Newlines are ordinary segment separators now; the old name is kept for callers.
+_translate_single_multiline = _translate_single_unit
+
+
+def _history_line(cn: str) -> str:
+    return schema.CONTROL_CODE_RE.sub("", cn).replace("\n", " ").strip()[:200]
 
 
 def _translate_batch_recursive(
@@ -1241,49 +1448,26 @@ def _translate_batch_recursive(
     """Returns (succeeded_map_by_unit_key, failed_records, updated_history)."""
     if len(batch) == 1:
         u = batch[0]
-        if "\n" in u["text"]:
-            cn, raw_saved, flags, fail_rec = _translate_single_multiline(
-                api_base, u, glossary_cn, history, known_speakers_desc
-            )
-        else:
-            cn, raw_saved, flags, fail_rec = _translate_single_unit(
-                api_base, u, glossary_cn, history, known_speakers_desc
-            )
+        cn, raw_saved, flags, fail_rec = _translate_single_unit(
+            api_base, u, glossary_cn, history, known_speakers_desc
+        )
         if fail_rec is None and cn is not None:
-            new_hist = history if u["kind"] in ("ui", "system") else (history + [cn])[-4:]
+            new_hist = history
+            if u["kind"] not in ("ui", "system") and "rule_fallback" not in flags:
+                new_hist = (history + [_history_line(cn)])[-4:]
             return {u["unit_key"]: (cn, raw_saved, flags)}, [], new_hist
         assert fail_rec is not None
         return {}, [fail_rec], history
 
-    matched = _match_glossary(batch, glossary_cn)
-    unit_tokens = [encode_placeholders(u["text"])[1] for u in batch]
     for temp in (0.3, 0.1):
-        msgs = build_sakura_messages(batch, glossary_cn, history)
-        try:
-            raw, _, _ = chat_stream(
-                api_base, MODEL_ALIAS, msgs, temperature=temp, top_p=0.8, max_tokens=2048
-            )
-        except Exception:
-            continue
-
-        lines = [ln for ln in raw.splitlines() if ln.strip()]
-        if len(lines) != len(batch):
-            continue
-
-        parsed: dict[str, tuple[str, str | None, list[str]]] = {}
-        batch_ok = True
-        new_hist = list(history)
-        for u, tokens, ln in zip(batch, unit_tokens, lines):
-            cn, raw_saved, flags, errs = _process_model_line(
-                ln, u, tokens, known_speakers_desc, matched
-            )
-            if errs:
-                batch_ok = False
-                break
-            parsed[u["unit_key"]] = (cn, raw_saved, flags)
-            if u["kind"] not in ("ui", "system"):
-                new_hist.append(cn)
-        if batch_ok:
+        parsed, _, _ = _attempt(
+            api_base, batch, glossary_cn, history, known_speakers_desc, temp, 2048
+        )
+        if parsed is not None:
+            new_hist = list(history)
+            for u in batch:
+                if u["kind"] not in ("ui", "system"):
+                    new_hist.append(_history_line(parsed[u["unit_key"]][0]))
             return parsed, [], new_hist[-4:]
 
     mid = len(batch) // 2
@@ -1347,6 +1531,8 @@ def load_overrides_file(path: Path) -> tuple[dict[str, str], dict[str, str]]:
                 val = obj.get("zh_cn")
             if val is None:
                 val = obj.get("override")
+            if obj.get("status") == "kept_source" and not str(val or "").strip():
+                continue  # review row the operator has not filled in yet
             if not isinstance(val, str) or not val.strip():
                 raise schema.SchemaError(
                     f"{path.name}:{lineno}: override requires non-empty translation/zh_cn/override"
@@ -1364,6 +1550,55 @@ def load_overrides_file(path: Path) -> tuple[dict[str, str], dict[str, str]]:
                     f"{path.name}:{lineno}: override row needs 'id', 'unit_key', or ('kind' + 'text')"
                 )
     return by_id, by_key
+
+
+def _revalidate_checkpoint(
+    done_map: dict[str, dict[str, Any]],
+    units_by_key: dict[str, dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, list[str]]]:
+    """Drop cached rows that fail the CURRENT validators so they get retranslated."""
+    valid: dict[str, dict[str, Any]] = {}
+    rejected: dict[str, list[str]] = {}
+    for key, row in done_map.items():
+        unit = units_by_key.get(key)
+        if unit is None:
+            valid[key] = row
+            continue
+        errs = validate_unit_translation(unit["text"], row["zh_cn"])
+        if errs:
+            rejected[key] = errs
+        else:
+            valid[key] = row
+    return valid, rejected
+
+
+def _make_attempt_sink(path: Path) -> Any:
+    """Append-only diagnostics; never deleted, and a write error never stops the job."""
+    lock = threading.Lock()
+
+    def _sink(entry: dict[str, Any]) -> None:
+        line = json.dumps({"at": schema.utc_now_iso(), **entry}, ensure_ascii=False) + "\n"
+        try:
+            with lock, open(path, "a", encoding="utf-8", newline="\n") as fh:
+                fh.write(line)
+        except OSError as exc:
+            print(f"[attempts] warn: could not append {path.name}: {exc}")
+
+    return _sink
+
+
+def untranslated_limit(total_records: int, max_ratio: float) -> int:
+    return int(total_records * max_ratio + 1e-9)
+
+
+def is_partial_summary(summary: dict[str, Any]) -> bool:
+    return bool(
+        summary.get("missing", 0)
+        or summary.get("no_cjk", 0)
+        or summary.get("latin_only", 0)
+        or summary.get("over_untranslated_limit", False)
+        or summary.get("transport_failed_units", 0)
+    )
 
 
 def _append_checkpoint_rows(
@@ -1429,9 +1664,17 @@ def translate_job(
     skip_gpu_check: bool = False,
     overrides_path: Path | None = None,
     repair_only: bool = False,
+    assemble_only: bool = False,
+    max_untranslated_ratio: float = DEFAULT_MAX_UNTRANSLATED_RATIO,
 ) -> dict[str, Any]:
+    global _ATTEMPT_SINK
     try:
-        if not force and not repair_only and schema.done_marker_path(output_dir, job).is_file():
+        if (
+            not force
+            and not repair_only
+            and not assemble_only
+            and schema.done_marker_path(output_dir, job).is_file()
+        ):
             schema.verify_done_marker(output_dir, job)
             print(f"[job] {job}: DONE marker verified, skipping (use --force to rerun)")
             return {"job": job, "status": "skipped_done"}
@@ -1508,6 +1751,13 @@ def translate_job(
     done_map, migrated = _load_checkpoint(ckpt_path, legacy_wid_to_key=legacy_wid_to_key)
     if migrated:
         print(f"[ckpt] Migrated {migrated} legacy wid-only checkpoint rows by unit_key")
+    done_map, rejected = _revalidate_checkpoint(done_map, seen_keys)
+    if rejected:
+        reasons: dict[str, int] = {}
+        for errs in rejected.values():
+            for err in errs:
+                reasons[err] = reasons.get(err, 0) + 1
+        print(f"[ckpt] {len(rejected)} cached units failed current validation, not reused: {reasons}")
 
     todo_units = [u for u in work_units if u["unit_key"] not in done_map]
     cached_count = len(work_units) - len(todo_units)
@@ -1526,6 +1776,11 @@ def translate_job(
         items = queues[0]
         step = max(8, (len(items) + N_PARALLEL - 1) // N_PARALLEL)
         queues = [items[i : i + step] for i in range(0, len(items), step)]
+
+    if assemble_only:
+        queues = []
+    # This run rewrites the outputs: drop any earlier DONE marker until the new result passes.
+    schema.done_marker_path(output_dir, job).unlink(missing_ok=True)
 
     ckpt_lock = threading.Lock()
     gpu_log_lock = threading.Lock()
@@ -1571,19 +1826,43 @@ def translate_job(
         return q_failures
 
     if queues:
-        with ThreadPoolExecutor(max_workers=N_PARALLEL) as pool:
-            for q_fail in pool.map(_run_queue, queues):
-                all_failures.extend(q_fail)
+        _ATTEMPT_SINK = _make_attempt_sink(work_dir / f"{job}.attempts.jsonl")
+        try:
+            with ThreadPoolExecutor(max_workers=N_PARALLEL) as pool:
+                for q_fail in pool.map(_run_queue, queues):
+                    all_failures.extend(q_fail)
+        finally:
+            _ATTEMPT_SINK = None
+
+    if assemble_only:
+        previous: dict[str, dict[str, Any]] = {}
+        if failures_path.is_file():
+            with open(failures_path, "r", encoding="utf-8-sig") as handle:
+                for raw in handle:
+                    if raw.strip():
+                        obj = json.loads(raw)
+                        previous[obj["unit_key"]] = obj
+        for unit in todo_units:
+            all_failures.append(
+                previous.get(unit["unit_key"])
+                or _build_failure_record(
+                    unit, rejected.get(unit["unit_key"]) or ["not_translated"], 0, "", glossary_cn
+                )
+            )
 
     if all_failures:
         failures_txt = "".join(json.dumps(f, ensure_ascii=False) + "\n" for f in all_failures)
         schema.atomic_write_text(failures_path, failures_txt)
-        print(f"[job] {job}: {len(all_failures)} units failed -> {failures_path}")
     elif failures_path.exists():
         failures_path.unlink()
+    failure_by_key = {f["unit_key"]: f for f in all_failures}
 
     # Re-load checkpoint cleanly and expand in exact original record order
     final_done, _ = _load_checkpoint(ckpt_path, legacy_wid_to_key=legacy_wid_to_key)
+    final_done, _ = _revalidate_checkpoint(final_done, seen_keys)
+    review: dict[str, dict[str, Any]] = {}
+    kept_rows = 0
+    rule_rows = 0
     missing_ids: list[str] = []
     cn_rows: list[dict[str, Any]] = []
     tw_rows: list[dict[str, Any]] = []
@@ -1593,8 +1872,27 @@ def translate_job(
     latin_only_count = 0
     repaired_units: set[str] = set()
 
-    for rec in records:
+    def _review(uk: str, status: str, cn: str, errs: list[str], line: int, rec: dict[str, Any]) -> None:
+        item = review.get(uk)
+        if item is None:
+            review[uk] = {
+                "unit_key": uk,
+                "status": status,
+                "translation": cn,
+                "text": rec["text"],
+                "kind": rec["kind"],
+                "speaker": rec.get("speaker"),
+                "first_line": line,
+                "first_id": rec["id"],
+                "rows": 1,
+                "errors": errs,
+            }
+        else:
+            item["rows"] += 1
+
+    for line_no, rec in enumerate(records, start=1):
         rid = rec["id"]
+        kept_source = False
         if rid in override_cn:
             cn_val = override_cn[rid]
         elif rid in passthrough_cn:
@@ -1602,7 +1900,13 @@ def translate_job(
         else:
             uk = rec_to_unit_key[rid]
             entry = final_done.get(uk)
-            if not entry:
+            if not entry and uk in failure_by_key:
+                # Last resort: ship the untouched source line and list it for review.
+                kept_source = True
+                kept_rows += 1
+                cn_val = rec["text"]
+                _review(uk, "kept_source", "", failure_by_key[uk]["errors"], line_no, rec)
+            elif not entry:
                 missing_ids.append(rid)
                 cn_val = ""
             else:
@@ -1610,13 +1914,19 @@ def translate_job(
                 flags_list = entry.get("flags") or []
                 if any(str(fl).startswith(REPAIR_FLAG_PREFIXES) for fl in flags_list):
                     repaired_units.add(uk)
+                if "rule_fallback" in flags_list:
+                    rule_rows += 1
+                    _review(uk, "rule_fallback", cn_val, [], line_no, rec)
                 lang_errs = check_language_qa(rec["text"], cn_val)
                 if "no_cjk" in lang_errs:
                     no_cjk_count += 1
                 if "latin_only" in lang_errs:
                     latin_only_count += 1
-        tw_val = to_traditional(cn_val, mode=tw_mode) if cn_val else ""
-        if cn_val:
+        if kept_source:
+            tw_val = cn_val  # Japanese stays byte-for-byte; never run it through OpenCC
+        else:
+            tw_val = to_traditional(cn_val, mode=tw_mode) if cn_val else ""
+        if cn_val and not kept_source:
             zh_cn_texts.append(cn_val)
             zh_tw_texts.append(tw_val)
         base_out = {
@@ -1635,6 +1945,18 @@ def translate_job(
             if to_simplified(tw_s) != cn_s:
                 roundtrip_mismatches += 1
 
+    limit = untranslated_limit(len(records), max_untranslated_ratio)
+    kept_units = sum(1 for item in review.values() if item["status"] == "kept_source")
+    rule_units = len(review) - kept_units
+    over_limit = kept_rows > limit
+    # A unit that never got an answer is an infrastructure problem, not an untranslatable line:
+    # it must block DONE even inside the limit (e.g. llama-server dying near the end of a job).
+    transport_units = sum(
+        1
+        for uk, item in review.items()
+        if item["status"] == "kept_source" and any(e.startswith("transport:") for e in item["errors"])
+    )
+
     qa_summary = {
         "job": job,
         "total_records": len(records),
@@ -1643,7 +1965,15 @@ def translate_job(
         "manual_overrides": len(override_cn),
         "repaired": len(repaired_units),
         "missing": len(missing_ids),
-        "failures": len(all_failures),
+        "failures": kept_units,
+        "kept_source_units": kept_units,
+        "kept_source_rows": kept_rows,
+        "kept_source_limit_rows": limit,
+        "over_untranslated_limit": over_limit,
+        "transport_failed_units": transport_units,
+        "rule_fallback_units": rule_units,
+        "rule_fallback_rows": rule_rows,
+        "cache_rejected_units": len(rejected),
         "no_cjk": no_cjk_count,
         "latin_only": latin_only_count,
         "tw_mode": tw_mode,
@@ -1663,16 +1993,34 @@ def translate_job(
         tw_out, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in tw_rows)
     )
     schema.atomic_write_json(qa_out, qa_summary)
+    review_out = output_dir / f"{job}.review.jsonl"
+    schema.atomic_write_text(
+        review_out,
+        "".join(
+            json.dumps(item, ensure_ascii=False) + "\n"
+            for item in sorted(review.values(), key=lambda i: i["first_line"])
+        ),
+    )
 
-    if not missing_ids and not all_failures and no_cjk_count == 0 and latin_only_count == 0:
-        marker = schema.build_done_marker(job, [cn_out, tw_out, qa_out], qa_summary)
+    model_rows = len(records) - len(missing_ids) - kept_rows - rule_rows - len(override_cn) - len(passthrough_cn)
+    complete = not is_partial_summary(qa_summary)
+    if complete:
+        marker = schema.build_done_marker(job, [cn_out, tw_out, qa_out, review_out], qa_summary)
         schema.atomic_write_json(schema.done_marker_path(output_dir, job), marker)
-        print(f"[job] {job}: COMPLETE 100% ({len(records)}/{len(records)}) -> {tw_out.name}")
-    else:
-        print(
-            f"[job] {job}: INCOMPLETE missing={len(missing_ids)} failures={len(all_failures)} "
-            f"no_cjk={no_cjk_count} latin_only={latin_only_count}; DONE marker NOT written"
-        )
+    status = "DONE" if complete else "PARTIAL"
+    print(f"[{status}] {job}: {len(records) - len(missing_ids)} / {len(records)} 列已輸出 -> {tw_out.name}")
+    print(f"  模型翻譯通過檢查：{model_rows}")
+    print(f"  固定規則補上：    {rule_rows}")
+    print(f"  人工指定／免翻：  {len(override_cn)} / {len(passthrough_cn)}")
+    print(f"  待你檢查（保留日文）：{kept_rows}（上限 {limit}）")
+    if review:
+        print(f"  檢查清單：{review_out.name}")
+    if rule_rows > len(records) * RULE_FALLBACK_WARN_RATIO:
+        print(f"  [warn] 固定規則補上的比例偏高（{rule_rows}/{len(records)}），請抽查")
+    if transport_units:
+        print(f"  [warn] {transport_units} 個單元沒有拿到模型回應（連線／server 問題），請用 --repair-only 重跑")
+    if missing_ids or no_cjk_count or latin_only_count:
+        print(f"  [warn] missing={len(missing_ids)} no_cjk={no_cjk_count} latin_only={latin_only_count}")
     return qa_summary
 
 
@@ -1685,6 +2033,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--repair-only", action="store_true", help="Resume from checkpoint and repair remaining units only")
     ap.add_argument("--job", help="Run only the named job (<job>.jsonl)")
     ap.add_argument("--overrides", help="Optional path to overrides JSONL file")
+    ap.add_argument(
+        "--assemble-only",
+        action="store_true",
+        help="No server, no model calls: rebuild outputs from checkpoint + overrides",
+    )
+    ap.add_argument(
+        "--max-untranslated-ratio",
+        type=float,
+        default=DEFAULT_MAX_UNTRANSLATED_RATIO,
+        help="Share of rows that may keep the Japanese source and still count as DONE",
+    )
     ap.add_argument("--skip-gpu-check", action="store_true")
     ap.add_argument("--manifest-wait", type=float, default=60.0)
     ap.add_argument("--min-tps", type=float, default=DEFAULT_MIN_TPS)
@@ -1742,7 +2101,9 @@ def main(argv: list[str] | None = None) -> int:
 
     proc: subprocess.Popen[Any] | None = None
     try:
-        if args.api_base:
+        if args.assemble_only:
+            api_base = ""
+        elif args.api_base:
             api_base = args.api_base.rstrip("/")
             if not args.skip_gpu_check:
                 run_preflight_gate(api_base, min_tps=args.min_tps)
@@ -1782,29 +2143,26 @@ def main(argv: list[str] | None = None) -> int:
                 skip_gpu_check=args.skip_gpu_check,
                 overrides_path=overrides_path,
                 repair_only=args.repair_only,
+                assemble_only=args.assemble_only,
+                max_untranslated_ratio=args.max_untranslated_ratio,
             )
             if proc is not None and proc.poll() is not None:
                 raise RuntimeError(
                     f"llama-server exited unexpectedly during job {jf.stem!r} (rc={proc.returncode}); "
                     "completed progress was saved to checkpoint.jsonl"
                 )
-            if (
-                summary.get("failures", 0)
-                or summary.get("missing", 0)
-                or summary.get("no_cjk", 0)
-                or summary.get("latin_only", 0)
-            ):
+            if is_partial_summary(summary):
                 partial_jobs.append(summary)
         if partial_jobs:
             print(
-                "[runner] PARTIAL_COMPLETE: all jobs finished running, outputs/checkpoint/failures saved, "
-                ".DONE.json NOT written for incomplete jobs:"
+                "[runner] PARTIAL_COMPLETE: all jobs finished running and outputs are saved; "
+                ".DONE.json NOT written for:"
             )
             for pj in partial_jobs:
                 print(
-                    f"  - {pj['job']}: missing={pj.get('missing', 0)} failures={pj.get('failures', 0)} "
-                    f"no_cjk={pj.get('no_cjk', 0)} latin_only={pj.get('latin_only', 0)} "
-                    f"-> {work_dir / (pj['job'] + '.failures.jsonl')}"
+                    f"  - {pj['job']}: 待補 {pj.get('kept_source_rows', 0)} 列"
+                    f"（上限 {pj.get('kept_source_limit_rows', 0)}） missing={pj.get('missing', 0)} "
+                    f"-> {output_dir / (pj['job'] + '.review.jsonl')}"
                 )
             return EXIT_PARTIAL
         return EXIT_OK

@@ -125,11 +125,23 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print("[doctor] Prebuilt bin    : MISSING (will auto-download from GitHub Release on Colab)")
 
-    inputs = sorted(p.name for p in dirs["sakura_input"].glob("*.jsonl"))
+    inputs = sorted(
+        p.name for p in dirs["sakura_input"].glob("*.jsonl") if not p.name.endswith(".overrides.jsonl")
+    )
     dones = sorted(p.name for p in dirs["sakura_output"].glob("*.DONE.json"))
     print(f"[doctor] Pending inputs  : {inputs}")
     print(f"[doctor] Completed DONEs : {dones}")
     return 0
+
+
+def _warn_unprotected_codes(records: list[dict[str, Any]]) -> None:
+    found = schema.find_unprotected_codes(records)
+    if found:
+        top = sorted(found.items(), key=lambda kv: -kv[1])[:10]
+        print(
+            "[validate] WARNING: markup-like tokens that are NOT protected from the model "
+            f"(replace them with {{{{TAG_n}}}} if they are control codes): {top}"
+        )
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -138,6 +150,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     if args.glossary:
         g_count = len(schema.validate_glossary_file(args.glossary))
     print(f"[validate] PASS: {Path(args.input).name} ({len(records)} records, {g_count} glossary terms)")
+    _warn_unprotected_codes(records)
     return 0
 
 
@@ -163,6 +176,7 @@ def cmd_push(args: argparse.Namespace) -> int:
     if args.force and old_done.exists():
         old_done.unlink()
 
+    _warn_unprotected_codes(records)
     _sync_scripts(dirs)
 
     dst_glossary: Path | None = None
@@ -231,8 +245,14 @@ def _job_status(dirs: dict[str, Path], job: str) -> dict[str, Any]:
         with open(qa_path, "r", encoding="utf-8-sig") as fh:
             qa = json.load(fh)
 
+    needs_review = {
+        key: (qa or {}).get(key, 0)
+        for key in ("kept_source_rows", "rule_fallback_rows")
+    }
+
     return {
         "job": job,
+        **needs_review,
         "input_present": inp.is_file(),
         "checkpoint_units": len(ckpt_ids),
         "failures": fail_count,
@@ -250,7 +270,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     jobs = (
         [schema.validate_job_name(args.name)]
         if args.name
-        else sorted({p.stem for p in dirs["sakura_input"].glob("*.jsonl")})
+        else sorted(
+            {p.stem for p in dirs["sakura_input"].glob("*.jsonl") if not p.name.endswith(".overrides.jsonl")}
+        )
     )
     if not jobs:
         print("[status] No jobs found")
@@ -293,7 +315,8 @@ def cmd_pull(args: argparse.Namespace) -> int:
 
     dest = Path(args.dest)
     dest.mkdir(parents=True, exist_ok=True)
-    for src in (tw_out, cn_out, qa_out, schema.done_marker_path(dirs["sakura_output"], job)):
+    review_out = dirs["sakura_output"] / f"{job}.review.jsonl"
+    for src in (tw_out, cn_out, qa_out, review_out, schema.done_marker_path(dirs["sakura_output"], job)):
         if src.is_file():
             dst = dest / src.name
             tmp = dst.with_name(f".{src.name}.tmp.{os.getpid()}")
@@ -303,7 +326,13 @@ def cmd_pull(args: argparse.Namespace) -> int:
     print(
         f"[pull] OK: {job} ({len(in_ids)} records, verified SHA-256) -> {dest}"
     )
-    print(f"[pull] QA summary: {json.dumps(marker.get('qa_summary', {}), ensure_ascii=False)}")
+    qa_summary = marker.get("qa_summary", {})
+    print(f"[pull] QA summary: {json.dumps(qa_summary, ensure_ascii=False)}")
+    if qa_summary.get("kept_source_rows") or qa_summary.get("rule_fallback_rows"):
+        print(
+            f"[pull] NEEDS REVIEW: {qa_summary.get('kept_source_rows', 0)} rows still Japanese, "
+            f"{qa_summary.get('rule_fallback_rows', 0)} rows rule-generated -> {job}.review.jsonl"
+        )
     return 0
 
 

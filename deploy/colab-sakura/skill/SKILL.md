@@ -31,10 +31,11 @@ python deploy/colab-sakura/drive_bridge.py push --input <job.jsonl> [--glossary 
 # 3. After user confirms Colab finished (either rc=0 [DONE] or rc=2 [PARTIAL]), check QA/DONE:
 python deploy/colab-sakura/drive_bridge.py status --name <job>
 
-# 3a. If [PARTIAL] (rc=2) and all remaining failures/no_cjk are resolved in <job>.overrides.jsonl (todo=0),
-#     assemble .DONE.json locally in seconds with ZERO Colab GPU usage:
-python <instructions_dir>/runner.py --drive-root "<drive_root>" --api-base http://127.0.0.1:9/v1 --repair-only --job <job> --skip-gpu-check --manifest-wait 0
-#     Otherwise add glossary/partial overrides and instruct user to run Colab with REPAIR_ONLY=True & TARGET_JOB="<job>".
+# 3a. To rebuild from the checkpoint + <job>.overrides.jsonl with ZERO Colab GPU usage and no model calls
+#     (writes .DONE.json if rows still in Japanese are <= 0.1% of all rows):
+python <instructions_dir>/runner.py --drive-root "<drive_root>" --assemble-only --job <job> --manifest-wait 0
+#     To have the model retry, add glossary/partial overrides and instruct user to run Colab with REPAIR_ONLY=True & TARGET_JOB="<job>".
+#     [DONE] can still contain Japanese or rule-generated rows: always report <job>.review.jsonl to the user.
 
 # 3b. Once DONE verified (or to retest post-DONE: use overrides + --repair-only, or delete target rows in checkpoint.jsonl + FORCE_RERUN=True),
 #     pull verified files, verify saved locally, and only then clean up sakura/{input,work,output}/ for that job.
