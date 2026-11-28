@@ -118,12 +118,22 @@ python deploy/colab-sakura/drive_bridge.py doctor
    - **若 Colab 顯示 `[PARTIAL]`（`rc = 2`）或 `status` 顯示 `failures > 0` / `qa.no_cjk > 0`，請進行增量修復（絕不重翻已完成單元）：**
      1. 檢視 `<Drive>\...\sakura\work\game_ch01.failures.jsonl` 內的 `errors`、`expected_placeholders` 與 `suggested_fix`，以及 `sakura/output/game_ch01.qa_report.json`。
      2. 可將外來語專有名詞補充到 `glossary.json`，或直接建立 `sakura/input/game_ch01.overrides.jsonl`（每行含 `"translation"` 及 `"id"` / `"unit_key"` / `"kind"+"speaker"+"text"`）。
-     3. 在 Colab 的 `sakura_colab.ipynb` 勾選 `REPAIR_ONLY = True`、`TARGET_JOB = "game_ch01"` 重跑（或本機接端點執行 `runner.py --repair-only --job game_ch01`）——runner 會保留已成功的快取譯文完全不動，僅補翻缺漏／失敗單元並重算 QA。
-2. 拉回本機（強制核對 `.DONE.json` 所有檔案 SHA-256 及 `id` 順序 100% 一致）：
+     3. **若剩餘失敗句已全數寫進 `overrides.jsonl`（`todo = 0`），直接在本機 0 GPU 重組並寫出 `.DONE.json`（免開 Colab L4）：**
+        ```powershell
+        python <instructions_dir>/runner.py --drive-root "<drive_root>" --api-base http://127.0.0.1:9/v1 --repair-only --job game_ch01 --skip-gpu-check --manifest-wait 0
+        ```
+     4. **若仍需模型重翻部分失敗句**：在 Colab 最新版 `sakura_colab.ipynb` 勾選 `REPAIR_ONLY = True`、`TARGET_JOB = "game_ch01"` 重跑——runner 會保留已成功的快取譯文完全不動，僅補翻缺漏／失敗單元並重算 QA。
+2. **`rc = 0`（`[DONE]`）事後恢復與局部補測速查表：**
+   | 情境 | 處置方式 | 要開 GPU 嗎？ |
+   |---|---|---|
+   | 誤按重跑且未改動 | 維持預設 `FORCE_RERUN=False, REPAIR_ONLY=False`，偵測有效 `.DONE.json` 直接 `skipping` 回 `rc = 0` | 不重翻 |
+   | 事後改少數特定句 | 寫入 `sakura/input/<job>.overrides.jsonl` 後跑上述本機 `--repair-only --skip-gpu-check`（`--repair-only` 會繞過 `.DONE.json` 跳過並重簽） | **0 GPU** |
+   | 強制 GPU 重翻特定句 / 整本 | 刪除 `sakura/work/<job>.checkpoint.jsonl` 對應行（或整份 checkpoint），開 Colab 勾 `FORCE_RERUN = True`（或 `REPAIR_ONLY = True`）重跑 | 只翻刪掉的句 |
+3. 拉回本機（強制核對 `.DONE.json` 所有檔案 SHA-256 及 `id` 順序 100% 一致）：
    ```powershell
    python deploy/colab-sakura/drive_bridge.py pull --name game_ch01 --dest work/translated
    ```
-3. 檢查 `work/translated/game_ch01.qa_report.json` 的 `manual_overrides`、`repaired`、`roundtrip_mismatches` 與 `watch_chars` 一對多字清單，再接續原本的遊戲資產寫回與本地 E2E 測試。
+4. 檢查 `work/translated/game_ch01.qa_report.json` 的 `manual_overrides`、`repaired`、`roundtrip_mismatches` 與 `watch_chars` 一對多字清單，再接續原本的遊戲資產寫回與本地 E2E 測試。
 
 ### Phase 4.5：拉回驗證通過後的雲盤殘留清理（必做）
 1. **僅在確認** `drive_bridge.py pull` 成功、所有 `.zh_TW.jsonl` / `.zh_CN.jsonl` / `.qa_report.json` / `.DONE.json` 已完整保存於本機工作區（且寫回或備份完成）**之後**，才能清理雲盤。

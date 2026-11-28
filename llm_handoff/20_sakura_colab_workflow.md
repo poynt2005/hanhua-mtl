@@ -133,10 +133,15 @@ Replace the `vast.ai` rental workflow for the Japanese -> Traditional Chinese Ga
 
 > **Standalone instructions export:** Every export to `<instructions_dir>/sakura-ollama-colab/` must bundle all **11 files** (the 9 files under `deploy/colab-sakura/` plus `20_sakura_colab_workflow.md` and `21_colab_session_postmortem.md`).
 
-### Incremental Repair After Partial Failure (`failures > 0` or `no_cjk > 0`)
-1. Inspect `sakura/work/<job>.failures.jsonl` (contains `unit_key`, `errors`, `expected_placeholders`, `observed_placeholders`, `suggested_fix`) and/or `sakura/output/<job>.qa_report.json`.
-2. For proper-noun loanwords, missing tags, or remaining `no_cjk` legacy lines, prepare `<job>.overrides.jsonl` in `sakura/input/` (keyed by `id`, `unit_key`, or `kind` + `speaker` + `text` with `"translation": "..."`).
-3. Re-run **without retranslating cached units**:
-   - In Colab: set `REPAIR_ONLY = True` and `TARGET_JOB = "<job>"` in `sakura_colab.ipynb` -> `Ctrl+F9`; or
-   - CLI: `python runner.py --drive-root <root> --api-base <url> --repair-only --job <job> [--overrides <path>]`
-4. Verify `missing == 0 and failures == 0 and no_cjk == 0 and latin_only == 0` and `<job>.DONE.json` SHA-256 verification passes before `pull`.
+### Incremental Repair & `rc = 0` / `rc = 2` Recovery Playbook
+1. **`rc = 2` (`[PARTIAL]`) 0-GPU local assembly (fastest when `todo == 0`):**
+   - Inspect `sakura/work/<job>.failures.jsonl` (`unit_key`, `errors`, `expected_placeholders`, `suggested_fix`) and `sakura/output/<job>.qa_report.json`.
+   - Write fixed lines into `sakura/input/<job>.overrides.jsonl` (keyed by `id`, `unit_key`, or `kind` + `speaker` + `text` with `"translation": "..."`).
+   - Run locally with zero GPU usage to rebuild outputs and emit `<job>.DONE.json` (`rc = 0`):
+     `python <instructions_dir>/runner.py --drive-root "<drive_root>" --api-base http://127.0.0.1:9/v1 --repair-only --job <job> --skip-gpu-check --manifest-wait 0`
+2. **`rc = 2` Colab L4 incremental repair (when model retranslation is needed):**
+   - Update `sakura/glossary.json` and/or partial `<job>.overrides.jsonl`, set `REPAIR_ONLY = True` and `TARGET_JOB = "<job>"` in latest `sakura_colab.ipynb`, and run `Ctrl+F9`. Cached units stay untouched.
+3. **`rc = 0` (`[DONE]`) post-completion adjustment / retest:**
+   - **Targeted overrides (0 GPU):** Add lines to `<job>.overrides.jsonl` and run the `--repair-only --skip-gpu-check` command above (`--repair-only` bypasses `.DONE.json` skip and re-signs `.DONE.json`), or post-process local `.zh_TW.jsonl`.
+   - **Force GPU retranslation of specific units / full volume:** Delete matching rows (or the entire file) from `sakura/work/<job>.checkpoint.jsonl`, then rerun Colab with `FORCE_RERUN = True` (or `REPAIR_ONLY = True`). Unchanged `.DONE.json` reruns with defaults cleanly skip and return `0`.
+4. Verify `missing == 0 and failures == 0 and no_cjk == 0 and latin_only == 0` and `<job>.DONE.json` SHA-256 passes before `pull`, then execute Step 7 Drive cleanup.
