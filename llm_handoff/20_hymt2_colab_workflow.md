@@ -94,4 +94,12 @@ Provide a zero-compile **Google Colab L4 (24 GB) + Google Drive (5 TB) one-click
 4. After completion (`[DONE]` `rc=0` or `[PARTIAL]` `rc=2`), inspect `hymt2/work/llama.log` (`common_params_fit_impl` + `offloaded` + tok/s), `hymt2/output/<job>.qa_report.json` (and `hymt2/work/<job>.failures.jsonl` if partial), pull verified outputs with `drive_bridge.py pull`, and manually spot-check explicit tone and `s2twp` `干`/`發`/`後` conversions before running full game scripts.
 5. **Post-pull Drive cleanup:** ONLY after `pull` passes SHA-256 + ID parity and local outputs are verified saved on disk, delete the completed job's residual files from `hymt2/input/`, `hymt2/work/`, and `hymt2/output/` so the next Colab job never scans stale files. **Never** delete `models/`, `bin/`, or `scripts/`.
 
+### `rc = 2` / `rc = 0` Recovery & Retest Playbook
+1. **`rc = 2` (`[PARTIAL]`) 0-GPU local assembly (`todo == 0`):** Inspect `hymt2/work/<job>.failures.jsonl`, add `"override": "..."` to the failed records in the source `.jsonl`, re-push with `drive_bridge.py push --force`, then run locally with zero GPU calls:
+   `python <instructions_dir>/runner.py --drive-root "<drive_root>" --api-base http://127.0.0.1:9/v1 --skip-gpu-check --manifest-wait 0`
+2. **`rc = 2` Colab L4 resume (model retranslation needed):** Update `hymt2/glossary.json` (and/or partial `"override"` fields + `push --force`), then run latest `hymt2_colab.ipynb` (`Ctrl+F9`); existing `checkpoint.jsonl` rows are reused without retranslating.
+3. **`rc = 0` (`[DONE]`) post-completion adjustment / retest:**
+   - **Targeted overrides (0 GPU):** Add `"override"` in `.jsonl` and `drive_bridge.py push --force` (clears stale `.DONE.json`), then run the local `--skip-gpu-check` command above (pass `--force` if running directly without re-push), or post-process local `.zh_TW.jsonl`.
+   - **Force GPU retranslation of specific units / full volume:** Delete the target `wid` rows (or entire file) in `hymt2/work/<job>.checkpoint.jsonl`, then rerun Colab with `FORCE_RERUN = True`. Unchanged `.DONE.json` reruns with `FORCE_RERUN = False` cleanly skip and return `0`.
+
 > **Standalone instructions export:** Every export to `<instructions_dir>/hymt2-heretic-colab/` must bundle all **11 files** (the 9 files under `deploy/colab-hymt2/` plus `20_hymt2_colab_workflow.md` and `21_colab_session_postmortem.md`).
