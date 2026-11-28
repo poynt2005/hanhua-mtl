@@ -6,6 +6,7 @@ Leaves zero artifacts in the repository.
 from __future__ import annotations
 
 import ast
+import contextlib
 import http.server
 import io
 import json
@@ -447,7 +448,9 @@ class Hymt2ColabTests(unittest.TestCase):
                 self.assertTrue((dirs["hymt2_output"] / "partial_en.zh_TW.jsonl").is_file())
                 qa = json.loads((dirs["hymt2_output"] / "partial_en.qa_report.json").read_text("utf-8"))
                 self.assertEqual(qa["failures"], 1)
-                self.assertEqual(qa["missing"], 1)
+                self.assertEqual(qa["missing"], 0)
+                self.assertEqual(qa["kept_source_rows"], 1)
+                self.assertTrue(qa["over_untranslated_limit"])
                 fails = [
                     json.loads(ln)
                     for ln in (dirs["hymt2_work"] / "partial_en.failures.jsonl").read_text("utf-8").splitlines()
@@ -548,6 +551,188 @@ class Hymt2ColabTests(unittest.TestCase):
         self.assertFalse(_sim_should_disconnect(-9, True, False))
         self.assertFalse(_sim_should_disconnect(2, False, False))
         self.assertTrue(_sim_should_disconnect(1, True, True))
+
+    # ---- guards against broken output ---------------------------------------
+
+    def test_truncated_output_is_never_accepted(self):
+        with _reply_server(lambda text, n: ("啊啊啊", "length")) as (api, prompts):
+            cn, _, _, probs = runner._translate_one_unit(api, _unit("It is a nice day."), [], [])
+        self.assertIsNone(cn)
+        self.assertEqual(probs, ["truncated"])
+        self.assertEqual(len(prompts), 3)
+
+    def test_control_codes_never_reach_model_and_survive_byte_exact(self):
+        src = "\u3000Twitch_w!250,0,\u3000\u3000twitch_w!250,0, and it shakes_w!250,0,"
+        self.assertEqual("".join(p for _, p in runner.split_segments(src)), src)
+        table = {"Twitch": "抽动", "twitch": "抽动", "and it shakes": "然后颤抖起来"}
+        with _reply_server(lambda text, n: (table[text], "stop")) as (api, prompts):
+            cn, _, _, probs = runner._translate_one_unit(api, _unit(src), [], [])
+        self.assertEqual(probs, [])
+        self.assertEqual(
+            cn, "\u3000抽动_w!250,0,\u3000\u3000抽动_w!250,0, 然后颤抖起来_w!250,0,"
+        )
+        self.assertEqual(len(prompts), 3, "one request per segment")
+        self.assertFalse(any("_w!" in p for p in prompts))
+        for bad in ("啊_ w!250,0,", "啊_w!250,0", "啊"):
+            self.assertIn("control_code_mismatch", runner.mechanical_problems(bad, "Ah_w!250,0,"))
+        self.assertFalse(runner.needs_translation({"kind": "ui", "text": "..._w!250,0,"}))
+
+    def test_runaway_rules_and_legitimate_repeats(self):
+        self.assertIn("repetition", runner.mechanical_problems("啊" * 40, "Ahh, no, stop it right now!!"))
+        self.assertIn("repetition", runner.mechanical_problems("好棒" * 9, "This is really, truly great."))
+        self.assertIn("too_long", runner.check_runaway("Yes.", "是的" + "，真的是这样没有错" * 5))
+        # long drawls and lines that already loop in the source stay legal
+        self.assertEqual(runner.mechanical_problems("啊" * 30, "A" + "h" * 30), [])
+        self.assertEqual(
+            runner.mechanical_problems("不要" * 9, "no no no no no no no no no"), []
+        )
+        self.assertEqual(runner.compress_long_runs("Ah" + "h" * 20), "Ahhhhhh")
+
+    def test_server_death_blocks_done_and_attempts_are_kept(self):
+        with tempfile.TemporaryDirectory() as td:
+            dirs = schema.ensure_drive_tree(Path(td) / schema.DRIVE_ROOT_NAME)
+            rows = [{"id": f"s{i}", "kind": "narration", "text": f"Line number {i}"} for i in range(2000)]
+            _write_job(dirs, "dead", rows)
+            _write_ckpt(dirs, "dead", rows[:-1], ["译文"] * 1999)
+            with mock.patch.object(runner.time, "sleep"):
+                rc = runner.main(["--drive-root", str(dirs["root"]), "--api-base", "http://127.0.0.1:9/v1",
+                                  "--skip-gpu-check", "--manifest-wait", "0"])
+            self.assertEqual(rc, runner.EXIT_PARTIAL)
+            self.assertFalse(schema.done_marker_path(dirs["hymt2_output"], "dead").is_file())
+            qa = json.loads((dirs["hymt2_output"] / "dead.qa_report.json").read_text("utf-8"))
+            self.assertEqual((qa["kept_source_rows"], qa["transport_failed_units"]), (1, 1))
+            self.assertIn("transport:", (dirs["hymt2_work"] / "dead.attempts.jsonl").read_text("utf-8"))
+
+    def test_limit_review_file_and_zero_gpu_rebuild(self):
+        self.assertEqual(runner.untranslated_limit(999, 0.001), 0)
+        for extra_hard, want_rc in ((0, runner.EXIT_OK), (1, runner.EXIT_PARTIAL)):
+            with tempfile.TemporaryDirectory() as td:
+                dirs = schema.ensure_drive_tree(Path(td) / schema.DRIVE_ROOT_NAME)
+                rows = [{"id": f"n{i}", "kind": "narration", "text": f"Line {i % 5}"} for i in range(1000)]
+                rows[3]["text"] = "Stubborn sentence"
+                if extra_hard:
+                    rows[7]["text"] = "Stubborn sentence two"
+                _write_job(dirs, "lim", rows)
+
+                def reply(text, n):
+                    return (text if "Stubborn" in text else "译文"), "stop"
+
+                with _reply_server(reply) as (api, _):
+                    rc = runner.main(["--drive-root", str(dirs["root"]), "--api-base", api,
+                                      "--skip-gpu-check", "--manifest-wait", "0"])
+                self.assertEqual(rc, want_rc)
+                out = dirs["hymt2_output"]
+                tw = [json.loads(x) for x in (out / "lim.zh_TW.jsonl").read_text("utf-8").splitlines()]
+                self.assertEqual(tw[3]["translation"], "Stubborn sentence")
+                review = [json.loads(x) for x in (out / "lim.review.jsonl").read_text("utf-8").splitlines()]
+                self.assertEqual(len(review), 1 + extra_hard)
+
+                review[0]["translation"] = "固执的句子"
+                (dirs["hymt2_input"] / "lim.overrides.jsonl").write_text(
+                    "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in review), encoding="utf-8"
+                )
+                rc = runner.main(["--drive-root", str(dirs["root"]), "--assemble-only",
+                                  "--job", "lim", "--manifest-wait", "0"])
+                self.assertEqual(rc, runner.EXIT_OK)
+                qa = json.loads((out / "lim.qa_report.json").read_text("utf-8"))
+                self.assertEqual((qa["kept_source_rows"], qa["manual_overrides"]), (extra_hard, 1))
+                buf = io.StringIO()
+                with mock.patch("sys.stdout", buf):
+                    drive_bridge.main(["--drive-root", str(dirs["root"]), "--skip-drivefs-check", "status"])
+                self.assertNotIn("lim.overrides", buf.getvalue())
+                pulled = Path(td) / "pulled"
+                self.assertEqual(drive_bridge.main(
+                    ["--drive-root", str(dirs["root"]), "--skip-drivefs-check", "pull",
+                     "--name", "lim", "--dest", str(pulled)]), 0)
+                self.assertTrue((pulled / "lim.review.jsonl").is_file())
+
+    def test_legacy_wid_checkpoint_migrates_revalidates_and_repairs(self):
+        with tempfile.TemporaryDirectory() as td:
+            dirs = schema.ensure_drive_tree(Path(td) / schema.DRIVE_ROOT_NAME)
+            rows = [
+                # only letters are inside the code: the OLD runner still numbered it as a work unit
+                {"id": "c0", "kind": "narration", "text": "..._w!250,0,"},
+                {"id": "c1", "kind": "narration", "text": "First line"},
+                {"id": "c2", "kind": "narration", "text": "Second line"},
+                {"id": "c3", "kind": "narration", "text": "Third line"},
+            ]
+            _write_job(dirs, "old", rows)
+            (dirs["hymt2_work"] / "old.checkpoint.jsonl").write_text(
+                "".join(
+                    json.dumps({"wid": w, "zh_cn": z}) + "\n"
+                    for w, z in (("w000002", "第一行"), ("w000003", "啊" * 500), ("w000004", "第三行"))
+                ),
+                encoding="utf-8",
+            )
+            buf = io.StringIO()
+            with _reply_server(lambda text, n: ("第二行", "stop")) as (api, prompts), \
+                    mock.patch("sys.stdout", buf):
+                rc = runner.main(["--drive-root", str(dirs["root"]), "--api-base", api, "--repair-only",
+                                  "--skip-gpu-check", "--manifest-wait", "0"])
+            self.assertEqual(rc, 0)
+            self.assertIn("cached=2 | todo=1", buf.getvalue())
+            self.assertEqual(prompts, ["Second line"])
+            cn = [json.loads(x)["translation"]
+                  for x in (dirs["hymt2_output"] / "old.zh_CN.jsonl").read_text("utf-8").splitlines()]
+            self.assertEqual(cn, ["..._w!250,0,", "第一行", "第二行", "第三行"])
+
+
+def _unit(text: str) -> dict:
+    return {
+        "unit_key": runner.make_unit_key("narration", None, text),
+        "wid": "w000001", "file": "f", "kind": "narration", "speaker": None, "text": text,
+    }
+
+
+def _write_job(dirs, job: str, rows: list) -> None:
+    inp = dirs["hymt2_input"] / f"{job}.jsonl"
+    inp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    schema.atomic_write_json(schema.manifest_path_for(inp), schema.build_manifest(job, inp, len(rows)))
+
+
+def _write_ckpt(dirs, job: str, rows: list, translations: list) -> None:
+    (dirs["hymt2_work"] / f"{job}.checkpoint.jsonl").write_text(
+        "".join(
+            json.dumps({"unit_key": runner.make_unit_key(r["kind"], None, r["text"]), "zh_cn": z}) + "\n"
+            for r, z in zip(rows, translations)
+        ),
+        encoding="utf-8",
+    )
+
+
+@contextlib.contextmanager
+def _reply_server(reply):
+    """Mock SSE server. reply(source_text, call_no) -> (text, finish_reason)."""
+    prompts: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            return
+
+        def do_POST(self):
+            req = json.loads(self.rfile.read(int(self.headers["Content-Length"])).decode("utf-8"))
+            msg = req["messages"][0]["content"]
+            if msg.startswith("将以下文本翻译为简体中文"):
+                src = msg.split("\n\n", 1)[1]
+            else:
+                src = re.search(r"【待翻译文本】\n(.*?)\n【翻译任务】", msg, re.S).group(1)
+            prompts.append(src)
+            text, finish = reply(src, len(prompts))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for ev in ({"choices": [{"delta": {"content": text}}]},
+                       {"choices": [{"delta": {}, "finish_reason": finish}]}):
+                self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8"))
+            self.wfile.write(b"data: [DONE]\n\n")
+
+    srv = _ThreadedHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}/v1", prompts
+    finally:
+        srv.shutdown()
+        srv.server_close()
 
 
 if __name__ == "__main__":

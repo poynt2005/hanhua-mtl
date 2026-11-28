@@ -28,7 +28,8 @@
 4. **英文專用簡轉繁預設使用 OpenCC `s2twp`**：與日文 Sakura 的 `s2t` 裁定不同，英翻中易產生大陸現代用詞（如 软件/视频），依 `deploy/hymt2-heretic/README.md` §6.1 預設使用 `s2twp`（台灣字形＋台灣詞彙），並同樣產出 `zh_CN.jsonl` 與 `watch_chars` 一對多字監控（特別留意 `干/发/后/面`）。
 5. **保留佔位符**：`{{TAG_n}}`、`⟦n⟧`、`\C[n]` 數量與順序必須 100% 一致，不符會自動觸發官方簡明模板 fallback 重試。
 6. **編碼與換行鐵律**：讀 JSON/JSONL 一律 `utf-8-sig`，寫檔 UTF-8 無 BOM + `\n`，**禁止透過 PowerShell heredoc 傳中文給 Python**。
-7. **成敗只看 `.DONE.json` 與 `qa_report.json`**（`missing=0, failures=0`）。
+7. **成敗只看 `.DONE.json` 與 `qa_report.json`**。`[DONE]` 條件：`missing=0`、沒有因連線／server 問題沒翻到的單元（`transport_failed_units=0`），且**保留英文原文的列數 `kept_source_rows` ≤ 總列數 × 0.1%**（無條件捨去；少於 1000 列時為 0）。**`[DONE]` 不代表全部翻完**：必須回報 `kept_source_rows` 並檢查 `<job>.review.jsonl`。
+8. **控制碼：** `_名稱!數字,數字,` 形式由 runner 切開保護；**其他格式仍須先換成 `{{TAG_n}}`**，`validate`／`push` 出現 `WARNING: markup-like tokens` 要先處理或確認。
 
 ---
 
@@ -79,32 +80,34 @@ python deploy/colab-hymt2/drive_bridge.py push --input work/job.jsonl --glossary
 ### Phase 3：Colab L4 端自動執行內容
 1. 檢查 `.manifest.json` SHA-256（最多輪詢等待 60 秒讓 DriveAPP 同步完）。
 2. 從 Drive `bin/` 解壓預編譯 `llama-server-l4-b12019.tar.gz`（若不存在則自動從本專案 GitHub Release 秒速下載並快取，Colab 全程零編譯）→ GPU 4 道硬檢：`nvidia-smi` >= `22,000 MiB`（拒跑 T4）→ `CUDA0` 可見 → `offloaded X/X layers to GPU` → VRAM 實佔 >= `18,000 MiB` → 3 句 Gate（日常 / 露骨 / 擬聲詞，0 拒答 0 `<think>`）且速度 `>= 8.0 tok/s`。
-3. 4 路並行翻譯＋斷點續傳（每 10 句批次寫入 Drive checkpoint 並於結束/例外 `finally` 強制 flush）；機械檢查失敗會先以官方 plain 模板重試一次，仍失敗記進 `failures.jsonl`。其中寬鬆拒答關鍵字（`抱歉`/`无法`/`I'm sorry`/`I can't`）僅套用於開機 Gate 4；正式逐句翻譯使用嚴格 AI 拒答樣板檢查，避免誤殺正常英文台詞。
-4. 當 `missing=0`、`failures=0` 全數通過時才寫入 `output/<job>.DONE.json` 並回傳結束碼 **`0`（`EXIT_OK`）**；若全數單元已跑完、譯文／`checkpoint.jsonl`／`failures.jsonl` 均已寫入但仍有少數拒答／失敗句（且 `llama-server` 未崩潰）則**不寫 `.DONE.json`** 並回傳結束碼 **`2`（`EXIT_PARTIAL`）**，Notebook 僅印出平靜的 `[PARTIAL]` 摘要、不拋 `RuntimeError`、同步 Drive 後照 `AUTO_DISCONNECT=True` 自動釋放 L4 省點數。唯有啟動 Gate 0–4、輸入檔異常、`checkpoint.jsonl` 連續 I/O 失敗或推論中 `llama-server` 意外終止才會回傳/拋錯 **`1`（`EXIT_FATAL`）**，`finally` 先 sync 日誌並 `drive.flush_and_unmount()`，且預設 `DISCONNECT_ON_ERROR=False` 會印出 `STOP THE RUNTIME NOW` 並於 `IDLE_UNASSIGN_MINUTES=15` 後自動釋放 GPU 防呆（寫入 `checkpoint.jsonl` 具 5 次指數退避重試，`gpu.log` 寫入失敗僅警告不中斷）。
+3. 4 路並行翻譯＋`unit_key` 斷點續傳。依控制碼切段，每段最多三次（personalization → plain → 無上文 personalization），仍不合格則整個單元**保留英文原文**。截斷、失控重複、過長、控制碼不符一律退回；被退回的回覆存 `work/<job>.attempts.jsonl`。舊 checkpoint 中通不過現行檢查的列不沿用。拒答檢查規則不變：寬鬆關鍵字只用於 Gate 4，逐句翻譯用嚴格樣板。
+4. 符合第二節第 7 條才寫 `output/<job>.DONE.json` 並回傳 **`0`（`EXIT_OK`）**；否則（且 `llama-server` 未崩潰）不寫 `.DONE.json`、回傳 **`2`（`EXIT_PARTIAL`）**，Notebook 印出 `[PARTIAL]` 摘要、同步 Drive 後照 `AUTO_DISCONNECT=True` 釋放 L4。啟動 Gate 0–4、輸入檔異常、`checkpoint.jsonl` 連續 I/O 失敗或 `llama-server` 意外終止才回傳 **`1`（`EXIT_FATAL`）**，`finally` 先 sync 日誌並 `drive.flush_and_unmount()`，預設 `DISCONNECT_ON_ERROR=False` 會印出 `STOP THE RUNTIME NOW` 並於 `IDLE_UNASSIGN_MINUTES=15` 後自動釋放 GPU。
 
 ### Phase 4：狀態檢查 →（若 Partial 補救 / 事後補測）→ 拉回驗證 → 續接寫回
 ```powershell
 python deploy/colab-hymt2/drive_bridge.py status --name en_game_01
 python deploy/colab-hymt2/drive_bridge.py pull --name en_game_01 --dest work/translated
 ```
-- **若 Colab 顯示 `[PARTIAL]`（`rc = 2`）或 `status` 顯示 `failures > 0`（全部句數已跑完並釋放 L4）：**
-  1. 檢視 `hymt2/work/<job>.failures.jsonl` 與 `hymt2/output/<job>.qa_report.json`。
-  2. **0 GPU 本機重組（全數補上 `"override"` 時，免開 Colab L4）：** 在原 `.jsonl` 對應行補上 `"override": "..."` 並執行 `drive_bridge.py push --force`（使 `todo = 0`），接著直接於本機執行：
+- **若為 `[PARTIAL]`（`rc = 2`），或想補齊 `[DONE]` 的待檢查列（通過檢查的單元不重翻）：**
+  1. 檢視 `hymt2/output/<job>.review.jsonl`；模型實際回覆查 `hymt2/work/<job>.attempts.jsonl`。
+  2. **0 GPU、不呼叫模型的重組：** 填好 `translation`（未填的列忽略），另存為 `hymt2/input/<job>.overrides.jsonl`，執行：
      ```powershell
-     python <instructions_dir>/runner.py --drive-root "<drive_root>" --api-base http://127.0.0.1:9/v1 --skip-gpu-check --manifest-wait 0
+     python <instructions_dir>/runner.py --drive-root "<drive_root>" --assemble-only --job <job> --manifest-wait 0
      ```
-     幾秒內即可重組輸出並寫入 `.DONE.json`（回傳 `rc = 0`）。
-  3. **若仍需模型重翻部分失敗句：** 調整 `glossary.json` 或為部分句加上 `"override"` 後 `drive_bridge.py push --force`，再開最新 `hymt2_colab.ipynb` 按 `Ctrl+F9`（因尚無 `.DONE.json`，會自動復用 `checkpoint.jsonl` 僅翻未完成單元）。
-- **`rc = 0`（`[DONE]`）事後恢復與局部補測速查表：**
+     仍保留原文的列數在上限內即寫出 `.DONE.json`。人工譯文不經自動檢查，控制碼須自行保留。
+  3. **要模型重翻：** 調整 `glossary.json` 或加部分 override，在最新 `hymt2_colab.ipynb` 設 `REPAIR_ONLY = True`、`TARGET_JOB = "<job>"` 後執行。
+- **`rc = 0`（`[DONE]`）事後處理：**
   | 情境 | 處置方式 | 要開 GPU 嗎？ |
   |---|---|---|
-  | 誤按重跑且未改動 | 維持預設 `FORCE_RERUN=False`，偵測有效 `.DONE.json` 直接 `skipping` 回 `rc = 0` | 不重翻 |
-  | 事後改少數特定句 | 原 `.jsonl` 補 `"override": "..."` 並 `drive_bridge.py push --force`（會清掉舊 `.DONE.json`），再跑上述本機 `--skip-gpu-check`（未重 push 時補加 `--force`）；或直接後處理 `.zh_TW.jsonl` | **0 GPU** |
-  | 強制 GPU 重翻特定句 / 整本 | 刪除 `hymt2/work/<job>.checkpoint.jsonl` 對應 `wid` 行（或整份 checkpoint），開 Colab 勾 `FORCE_RERUN = True` 重跑 | 只翻刪掉的句 |
-- 拉回後先人工/腳本抽檢 `hymt2/work/llama.log` 的顯存餘裕與 `qa_report.json` 的 `watch_chars`（特別檢查 `干/發/後/面` 在 `s2twp` 下有無誤轉）及前 50 句 H-scene 語氣，確認無拒答/委婉再寫回遊戲。
+  | 誤按重跑且未改動 | 偵測有效 `.DONE.json` 直接 skipping | 不重翻 |
+  | 事後改少數句 | 寫 `<job>.overrides.jsonl` 後跑上述 `--assemble-only` | **0 GPU** |
+  | 強制重翻 | 刪 checkpoint 對應 `unit_key` 列（或整份），`REPAIR_ONLY = True` 或 `FORCE_RERUN = True` 重跑 | 只翻刪掉的句 |
+- 拉回後回報 `kept_source_rows` 並檢查 `review.jsonl`；抽檢 `llama.log` 顯存餘裕、`watch_chars`（`干/發/後/面`）與前 50 句語氣，確認無拒答／委婉再寫回遊戲。
+
+---
 
 ### Phase 4.5：拉回驗證通過後的雲盤殘留清理（必做）
-1. **僅在確認** `drive_bridge.py pull` 成功、所有 `.zh_TW.jsonl` / `.zh_CN.jsonl` / `.qa_report.json` / `.DONE.json` 已完整保存於本機工作區（且寫回或備份完成）**之後**，才能清理雲盤。
+1. **僅在確認** `drive_bridge.py pull` 成功、所有 `.zh_TW.jsonl` / `.zh_CN.jsonl` / `.qa_report.json` / `.review.jsonl` / `.DONE.json` 已完整保存於本機工作區（且寫回或備份完成）**之後**，才能清理雲盤。
 2. 清理目標**僅限本次已完成任務**位於雲端硬碟目錄下的殘留檔：`hymt2/input/`、`hymt2/work/`、`hymt2/output/`（以及若不再沿用之任務專屬 `hymt2/glossary.json`），避免下一款遊戲啟動 Colab 時掃描到舊任務殘留、造成錯誤或重複執行。
 3. **絕對不可刪除**共用的 `models/`、`bin/` 與 `scripts/`。
 

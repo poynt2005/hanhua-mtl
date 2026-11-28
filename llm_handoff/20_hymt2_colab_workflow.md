@@ -1,10 +1,10 @@
 # 20 — Hy-MT2 Colab Workflow (`hymt2-heretic-colab`)
 
 > **Branch:** `hymt2-heretic-colab` (branched from `origin/hymt2-heretic` at `b10f481`)
-> **Updated:** 2026-11-28 01:32 +08:00
-> **Agent:** Antigravity
-> **Model:** Gemini 4 Neon
-> **Status:** READY — Milestone 11 complete (Option A exit-code separation `0/1/2`, mid-run `llama-server` crash guard, 5x Drive FUSE checkpoint write retry, `gpu.log` resilience, `DISCONNECT_ON_ERROR=False` + `IDLE_UNASSIGN_MINUTES=15`, Gate 4 `-lv 4` + 5s async flush poll, plain-template preflight fallback, C11 separated `_GATE_REFUSAL_RE` vs strict AI-boilerplate `_REFUSAL_RE`; 10/10 offline tests & sanitization passed; live L4 GPU boot still `not tested`)
+> **Updated:** 2026-11-28 (+08:00), Milestone 12
+> **Agent:** Claude Code (Milestone 12); Antigravity (Milestones 1-11)
+> **Model:** Claude Sonnet 5.5 (Milestone 12); Gemini 4 Neon (Milestones 1-11)
+> **Status:** Milestone 12 (guards ported from sakura Milestone 13) verified **offline only**: 16/16 tests and 3 hostile-model chaos runs on synthetic English input. **This branch has still never booted on a GPU**, and no real hymt2 output has been checked. Where sections 2.1-2.3 disagree with 2.4, **2.4 wins**.
 > **Session Postmortem & Full Context:** See [21_colab_session_postmortem.md](21_colab_session_postmortem.md) for the complete C1–C12 failure table, 10-item operator accountability log, F1–F11 review fixes, 9 permanent guardrails, and live Colab L4 specs.
 
 ---
@@ -56,6 +56,20 @@ Provide a zero-compile **Google Colab L4 (24 GB) + Google Drive (5 TB) one-click
 - **Drive FUSE resilience:** `_append_checkpoint_rows` retries transient `OSError` up to `5` times (`0.25s` exponential backoff) inside `_flush_pending` before updating `done_map` / `progress_counter`; `_log_gpu_progress` isolates `gpu.log` `OSError` as a non-fatal warning.
 - **L4 VRAM headroom warning (`not tested` live):** Observed Colab L4 free VRAM before model load was `22,369 MiB` during Sakura Run #4, and `llama.cpp` `b12019` defaults `-fit on` (targeting `>= 1,024 MiB` free device memory). At `CTX_SIZE = 32768`, `Hy-MT2-30B-A3B` weights (~17.0 GiB) + KV cache (~3.0 GiB) + compute buffers project to `~20.8-21.2 GiB` — very close to the `-fit on` threshold. On the first live L4 boot, inspect `hymt2/work/llama.log` (`common_params_fit_impl` lines); if `-fit on` spills layers to CPU and fails Gate 2, lowering `CTX_SIZE` from `32768` to `16384` (4,096/slot, still ample for 1-line requests) frees ~1.5 GiB immediately.
 
+### 2.4 Milestone 12: broken-output guards (supersedes older text above)
+
+Ported by hand from `sakura-ollama-colab` Milestone 13, where a real job delivered runaway repetition and damaged control codes that had passed QA. **No such defect has been observed on hymt2** (it has no live run); the same gaps existed in its code (no `finish_reason` check, no length/repetition check, fixed `max_tokens`).
+
+- `finish_reason=length` -> `OutputTruncated`, never accepted. `max_tokens` = min(1024, max(96, 2 x chars + 48)). Sampling is unchanged.
+- Inline control codes `_name!n,n,` are split out and re-inserted by the runner. **Each segment is its own request** (earlier source segments are passed as context). Newlines are **not** split (unchanged behaviour). `control_code_mismatch` is validated; codes are ignored by the "has English" and "not translated" checks.
+- Runaway: `too_long` (> 2x source + 30), `repetition` (single-char run > max(24, 2 x source letter run + 4), or a Chinese phrase looping 8+ times when the English source has no loop of its own). Letter runs > 6 are shortened in the prompt only. **These thresholds are untested against real hymt2 output.**
+- Per segment, 3 tries: personalization template -> card plain template -> personalization without context. Then the **whole unit keeps the English source**. No interjection table and no Japanese kana/quote rules were ported.
+- Stable SHA-1 `unit_key` checkpoint (legacy `wid` rows migrate using the old numbering rule); cached rows are revalidated on load and at assembly.
+- `[DONE]` when kept-source rows <= floor(total x 0.001) (`--max-untranslated-ratio`), `missing = 0`, and no unit failed on transport. `qa.failures` = kept units and may be non-zero in a DONE job.
+- `work/<job>.attempts.jsonl` (rejected raw replies, append-only) and `output/<job>.review.jsonl` (covered by DONE, copied by `pull`; fill `translation` and save as `input/<job>.overrides.jsonl`).
+- New CLI: `--repair-only`, `--job`, `--overrides`, `--assemble-only`. Notebook adds `REPAIR_ONLY`, `TARGET_JOB`.
+- Verification: 16/16 tests (one old test changed on purpose: a failed line is now kept source, not `missing`); 3 chaos seeds on 8,000 synthetic rows with ~4k injected faults each: no invariant violation.
+
 ---
 
 ## 3. Progress Log
@@ -73,6 +87,7 @@ Provide a zero-compile **Google Colab L4 (24 GB) + Google Drive (5 TB) one-click
 | 2026-11-28 00:52 | Milestone 9: Port `IDLE_UNASSIGN_MINUTES=15` Safeguard & Sync Postmortem C10 | Done | Added `IDLE_UNASSIGN_MINUTES = 15` bounded countdown and `STOP THE RUNTIME NOW` banner after Drive flush in `hymt2_colab.ipynb`; synced `21_colab_session_postmortem.md` |
 | 2026-11-28 01:02 | Milestone 10: Narrow `_REFUSAL_RE` in `mechanical_problems()` to Prevent Dialogue False Positives (C11) | Done | Separated `_GATE_REFUSAL_RE` (Gate 4 only) from strict AI-boilerplate `_REFUSAL_RE` in `mechanical_problems()`, preventing normal English->Chinese dialogue (`"抱歉，我无法……"`) from being falsely flagged as refusals; synced `runner.py` to Drive `scripts/hymt2/` |
 | 2026-11-28 01:32 | Milestone 11: Option A Exit-Code Separation (`0/1/2`) & FUSE I/O Resilience (C12) | Done | Separated `EXIT_OK = 0`, `EXIT_FATAL = 1`, `EXIT_PARTIAL = 2` so completed runs with minor failures save all outputs, skip `.DONE.json`, print calm `[PARTIAL]` summary in `hymt2_colab.ipynb` (no `RuntimeError`), and still honor `AUTO_DISCONNECT=True`; added `proc.poll() is not None` mid-run server crash guard, 5-attempt exponential-backoff `_append_checkpoint_rows` (committing `done_map` post-write), and `gpu.log` `OSError` warning isolation; added 4 tests (`10/10` pass) |
+| 2026-11-28 | Milestone 12: broken-output guards, control-code segmentation, `unit_key`, overrides/repair/assemble, review + attempts files, 0.1% DONE rule | Done offline | See 2.4. 16/16 tests + chaos runs. Never run on a GPU |
 
 ---
 
@@ -95,11 +110,10 @@ Provide a zero-compile **Google Colab L4 (24 GB) + Google Drive (5 TB) one-click
 5. **Post-pull Drive cleanup:** ONLY after `pull` passes SHA-256 + ID parity and local outputs are verified saved on disk, delete the completed job's residual files from `hymt2/input/`, `hymt2/work/`, and `hymt2/output/` so the next Colab job never scans stale files. **Never** delete `models/`, `bin/`, or `scripts/`.
 
 ### `rc = 2` / `rc = 0` Recovery & Retest Playbook
-1. **`rc = 2` (`[PARTIAL]`) 0-GPU local assembly (`todo == 0`):** Inspect `hymt2/work/<job>.failures.jsonl`, add `"override": "..."` to the failed records in the source `.jsonl`, re-push with `drive_bridge.py push --force`, then run locally with zero GPU calls:
-   `python <instructions_dir>/runner.py --drive-root "<drive_root>" --api-base http://127.0.0.1:9/v1 --skip-gpu-check --manifest-wait 0`
-2. **`rc = 2` Colab L4 resume (model retranslation needed):** Update `hymt2/glossary.json` (and/or partial `"override"` fields + `push --force`), then run latest `hymt2_colab.ipynb` (`Ctrl+F9`); existing `checkpoint.jsonl` rows are reused without retranslating.
-3. **`rc = 0` (`[DONE]`) post-completion adjustment / retest:**
-   - **Targeted overrides (0 GPU):** Add `"override"` in `.jsonl` and `drive_bridge.py push --force` (clears stale `.DONE.json`), then run the local `--skip-gpu-check` command above (pass `--force` if running directly without re-push), or post-process local `.zh_TW.jsonl`.
-   - **Force GPU retranslation of specific units / full volume:** Delete the target `wid` rows (or entire file) in `hymt2/work/<job>.checkpoint.jsonl`, then rerun Colab with `FORCE_RERUN = True`. Unchanged `.DONE.json` reruns with `FORCE_RERUN = False` cleanly skip and return `0`.
+1. **Review:** read `hymt2/output/<job>.review.jsonl` (raw rejected replies: `hymt2/work/<job>.attempts.jsonl`).
+2. **0-GPU rebuild:** fill `translation`, save as `hymt2/input/<job>.overrides.jsonl`, then run
+   `python <instructions_dir>/runner.py --drive-root "<drive_root>" --assemble-only --job <job> --manifest-wait 0`
+3. **Model retry:** adjust `glossary.json` / partial overrides, set `REPAIR_ONLY = True` and `TARGET_JOB`, rerun the latest notebook. Passing rows are reused.
+4. **Force retranslation:** delete the rows (by `unit_key`) or the whole checkpoint, rerun with `REPAIR_ONLY = True` or `FORCE_RERUN = True`.
 
 > **Standalone instructions export:** Every export to `<instructions_dir>/hymt2-heretic-colab/` must bundle all **11 files** (the 9 files under `deploy/colab-hymt2/` plus `20_hymt2_colab_workflow.md` and `21_colab_session_postmortem.md`).

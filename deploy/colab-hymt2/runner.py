@@ -62,6 +62,10 @@ EXIT_FATAL = 1
 EXIT_PARTIAL = 2
 CHECKPOINT_WRITE_RETRIES = 5
 CHECKPOINT_RETRY_BASE_DELAY = 0.25
+DEFAULT_MAX_UNTRANSLATED_RATIO = 0.001
+PROMPT_MAX_LETTER_RUN = 6
+RUN_LIMIT_FLOOR = 24
+ATTEMPT_RAW_LIMIT = 4000
 
 SAMPLING = {
     "temperature": 0.7,
@@ -96,6 +100,14 @@ _REFUSAL_RE = re.compile(
     re.I,
 )
 _OFFLOAD_RE = re.compile(r"offloaded\s+(\d+)\s*/\s*(\d+)\s+layers\s+to\s+GPU", re.I)
+
+# Control-code runs (with trailing spaces) are split points the model never sees.
+_SEPARATOR_RE = re.compile(r"((?:(?:" + schema.CONTROL_CODE_RE.pattern + r")[ 　]*)+)")
+_LONG_LETTER_RUN_RE = re.compile(r"([A-Za-z])\1{%d,}" % PROMPT_MAX_LETTER_RUN)
+_CHAR_RUN_RE = re.compile(r"([一-鿿A-Za-z])\1*")
+_SOURCE_RUN_RE = re.compile(r"([A-Za-z])\1*", re.I)
+_SOURCE_LOOP_RE = re.compile(r"([A-Za-z][^\n]{0,9}?)\1{4,}", re.I)
+_PHRASE_LOOP_RE = re.compile(r"([一-鿿][^\n]{1,7}?)\1{7,}")
 
 _CC_CACHE: dict[str, Any] = {}
 _CC_LOCK = threading.Lock()
@@ -434,15 +446,26 @@ def _http_get_json(url: str, timeout: float = 5.0) -> tuple[int, Any]:
         return resp.status, json.loads(raw) if raw else {}
 
 
+class OutputTruncated(Exception):
+    """The server stopped at a token limit, so the text is incomplete."""
+
+    def __init__(self, text: str):
+        super().__init__("output truncated (finish_reason=length)")
+        self.text = text
+
+
 def chat_stream(
     api_base: str,
     model: str,
     messages: list[dict[str, str]],
     timeout: float = 180.0,
     retries: int = 3,
+    max_tokens: int | None = None,
 ) -> tuple[str, int, float]:
     """Streaming SSE chat completion using Hy-MT2 model card sampling."""
     payload = dict(SAMPLING, model=model, messages=messages, stream=True)
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     data = json.dumps(payload).encode("utf-8")
     url = api_base.rstrip("/") + "/chat/completions"
     last_err: Exception | None = None
@@ -452,6 +475,7 @@ def chat_stream(
         pieces: list[str] = []
         chunk_tokens = 0
         usage_tokens: int | None = None
+        finish_reason: str | None = None
         try:
             req = urllib.request.Request(
                 url,
@@ -480,6 +504,8 @@ def chat_stream(
                     choices = chunk.get("choices") or []
                     if not choices:
                         continue
+                    if choices[0].get("finish_reason"):
+                        finish_reason = choices[0]["finish_reason"]
                     delta = choices[0].get("delta") or {}
                     piece = delta.get("content")
                     if piece:
@@ -487,6 +513,8 @@ def chat_stream(
                         chunk_tokens += 1
             elapsed = max(0.001, time.monotonic() - t0)
             text = "".join(pieces)
+            if finish_reason == "length":
+                raise OutputTruncated(text)
             if not text:
                 raise RuntimeError("stream produced empty content")
             tokens = usage_tokens if usage_tokens and usage_tokens > 0 else max(chunk_tokens, len(text))
@@ -558,6 +586,29 @@ def clean_output(output: str) -> str:
     return _THINK_RE.sub("", text).strip()
 
 
+def compress_long_runs(text: str) -> str:
+    """Shorten very long letter runs in the PROMPT only; they push models into repetition loops."""
+    return _LONG_LETTER_RUN_RE.sub(lambda m: m.group(1) * PROMPT_MAX_LETTER_RUN, text)
+
+
+def check_runaway(src_text: str, zh_cn: str) -> list[str]:
+    """Reject degenerate repetition and outputs far longer than their English source."""
+    src = schema.CONTROL_CODE_RE.sub("", src_text or "")
+    out = schema.CONTROL_CODE_RE.sub("", zh_cn or "")
+    errs: list[str] = []
+    if len(out) > 2 * len(src) + 30:
+        errs.append("too_long")
+    drawl = max((len(m.group(0)) for m in _SOURCE_RUN_RE.finditer(src)), default=0)
+    longest = max((len(m.group(0)) for m in _CHAR_RUN_RE.finditer(out)), default=0)
+    if longest > max(RUN_LIMIT_FLOOR, 2 * drawl + 4):
+        errs.append("repetition")
+    elif not _SOURCE_LOOP_RE.search(src) and any(
+        len(set(m.group(1))) > 1 for m in _PHRASE_LOOP_RE.finditer(out)
+    ):
+        errs.append("repetition")
+    return errs
+
+
 def mechanical_problems(output: str, source: str | None = None) -> list[str]:
     probs: list[str] = []
     text = output.strip()
@@ -572,9 +623,13 @@ def mechanical_problems(output: str, source: str | None = None) -> list[str]:
         probs.append("extra_lines")
     if source is not None and schema.extract_placeholders(source) != schema.extract_placeholders(text):
         probs.append("placeholder_mismatch")
+    if source is not None:
+        if schema.extract_control_codes(source) != schema.extract_control_codes(text):
+            probs.append("control_code_mismatch")
+        probs.extend(check_runaway(source, text))
     if _REFUSAL_RE.search(text):
         probs.append("refusal")
-    letters = sum(c.isascii() and c.isalpha() for c in text)
+    letters = sum(c.isascii() and c.isalpha() for c in schema.CONTROL_CODE_RE.sub("", text))
     if not _CJK_RE.search(text) and letters > 3:
         probs.append("not_translated")
     return probs
@@ -735,7 +790,59 @@ def run_preflight_gate(api_base: str, min_tps: float = DEFAULT_MIN_TPS) -> None:
 def needs_translation(rec: dict[str, Any]) -> bool:
     if rec.get("override") is not None:
         return False
-    return bool(_EN_PRESENT_RE.search(rec["text"]))
+    return bool(_EN_PRESENT_RE.search(schema.CONTROL_CODE_RE.sub("", rec["text"])))
+
+
+def make_unit_key(kind: str, speaker: str | None, text: str) -> str:
+    """Stable SHA-1 identity independent of sequential display wid."""
+    raw = f"{kind}\0{speaker or ''}\0{text}".encode("utf-8")
+    return hashlib.sha1(raw).hexdigest()
+
+
+def validate_unit_translation(src_text: str, zh_cn: str) -> list[str]:
+    return mechanical_problems(zh_cn, src_text)
+
+
+def split_segments(text: str) -> list[tuple[bool, str]]:
+    """Split into (translatable, piece) parts; ''.join(pieces) always equals the input."""
+    parts: list[tuple[bool, str]] = []
+    for idx, piece in enumerate(_SEPARATOR_RE.split(text)):
+        if piece:
+            parts.append((idx % 2 == 0 and bool(_EN_PRESENT_RE.search(piece)), piece))
+    return parts
+
+
+def assemble_segments(source: str, outputs: list[str]) -> str:
+    """Re-insert translated segments between the untouched source separators/literals."""
+    it = iter(outputs)
+    out: list[str] = []
+    for translatable, piece in split_segments(source):
+        if not translatable:
+            out.append(piece)
+            continue
+        lead = piece[: len(piece) - len(piece.lstrip(" \u3000"))]
+        tail = piece[len(piece.rstrip(" \u3000")):]
+        out.append(lead + next(it).strip(" \u3000") + tail)
+    return "".join(out)
+
+
+_ATTEMPT_SINK: Any = None
+
+
+def _record_attempt(unit: dict[str, Any], segment: str, mode: str, errs: list[str], raw: str) -> None:
+    """Keep what the model actually returned for every rejected request."""
+    sink = _ATTEMPT_SINK
+    if sink is not None:
+        sink(
+            {
+                "unit_keys": [unit["unit_key"]] if unit.get("unit_key") else [],
+                "sources": [segment],
+                "template": mode,
+                "errors": errs,
+                "raw": raw[:ATTEMPT_RAW_LIMIT],
+                "raw_len": len(raw),
+            }
+        )
 
 
 def _prepare_glossary_simplified(entries: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -749,55 +856,94 @@ def _prepare_glossary_simplified(entries: list[dict[str, str]]) -> list[dict[str
     ]
 
 
+def _translate_segment(
+    api_base: str,
+    unit: dict[str, Any],
+    segment: str,
+    speaker: str | None,
+    glossary_cn: list[dict[str, str]],
+    context: list[str],
+) -> tuple[tuple[str, str | None, list[str]] | None, list[str]]:
+    """Three tries: personalization template -> card plain template -> personalization without context."""
+    prompt_text = compress_long_runs(segment)
+    max_tokens = min(SAMPLING["max_tokens"], max(96, 2 * len(prompt_text) + 48))
+
+    def _rich(ctx: list[str]) -> list[dict[str, str]]:
+        return build_hymt2_messages(prompt_text, unit["kind"], glossary_cn, speaker=speaker, context=ctx)
+
+    plan = (
+        ("styled", lambda: _rich(context)),
+        ("plain", lambda: build_hymt2_messages_plain(prompt_text)),
+        ("styled_no_context", lambda: _rich([])),
+    )
+    last_probs: list[str] = ["unknown"]
+    for mode, build in plan:
+        try:
+            out, _, _ = chat_stream(api_base, MODEL_ALIAS, build(), max_tokens=max_tokens)
+        except OutputTruncated as exc:
+            last_probs = ["truncated"]
+            _record_attempt(unit, segment, mode, last_probs, exc.text)
+            continue
+        except Exception as exc:
+            last_probs = [f"transport:{exc}"]
+            _record_attempt(unit, segment, mode, last_probs, "")
+            continue
+        cleaned = clean_output(out)
+        cn = output_to_simplified(cleaned)
+        probs = mechanical_problems(out.strip(), segment) or mechanical_problems(cn, segment)
+        if probs:
+            last_probs = probs
+            _record_attempt(unit, segment, mode, probs, out)
+            continue
+        flags = ["fallback_plain"] if mode == "plain" else []
+        if cn != cleaned:
+            flags.append("t2s")
+        return (cn, cleaned if cn != cleaned else None, flags), []
+    return None, last_probs
+
+
 def _translate_one_unit(
     api_base: str,
     unit: dict[str, Any],
     glossary_cn: list[dict[str, str]],
     context: list[str],
 ) -> tuple[str | None, str | None, list[str], list[str]]:
-    """Rich personalization template first; fallback once with card plain template."""
-    msgs = build_hymt2_messages(
-        unit["text"],
-        unit["kind"],
-        glossary_cn,
-        speaker=unit.get("speaker"),
-        context=context,
-    )
-    last_probs: list[str] = ["unknown"]
-    try:
-        out, _, _ = chat_stream(api_base, MODEL_ALIAS, msgs)
-        probs = mechanical_problems(out, unit["text"])
-        if not probs:
-            cleaned = clean_output(out)
-            cn = output_to_simplified(cleaned)
-            flags = ["t2s"] if cn != cleaned else []
-            return cn, (cleaned if flags else None), flags, []
-        last_probs = probs
-    except Exception as exc:
-        last_probs = [f"transport:{exc}"]
-
-    # Fallback once with the official plain template
-    try:
-        plain_out, _, _ = chat_stream(
-            api_base, MODEL_ALIAS, build_hymt2_messages_plain(unit["text"])
+    """One request per segment between control codes; the runner re-inserts the codes itself."""
+    segments = [piece for translatable, piece in split_segments(unit["text"]) if translatable]
+    outputs: list[str] = []
+    raws: list[str] = []
+    flags: list[str] = []
+    seg_context = list(context)
+    for idx, segment in enumerate(segments):
+        speaker = unit.get("speaker") if idx == 0 else None
+        result, probs = _translate_segment(
+            api_base, unit, segment.strip(" \u3000"), speaker, glossary_cn, seg_context
         )
-        probs2 = mechanical_problems(plain_out, unit["text"])
-        if not probs2:
-            cleaned = clean_output(plain_out)
-            cn = output_to_simplified(cleaned)
-            flags = ["fallback_plain"] + (["t2s"] if cn != cleaned else [])
-            return cn, (cleaned if cn != cleaned else None), flags, []
-        last_probs = probs2
-    except Exception as exc:
-        last_probs = [f"fallback_transport:{exc}"]
+        if result is None:
+            return None, None, [], probs
+        cn, raw_saved, seg_flags = result
+        outputs.append(cn)
+        raws.append(raw_saved if raw_saved is not None else cn)
+        flags.extend(f for f in seg_flags if f not in flags)
+        if unit["kind"] not in ("ui", "system"):
+            seg_context = (seg_context + [segment.strip(" \u3000")])[-3:]
+    joined = assemble_segments(unit["text"], outputs)
+    probs = validate_unit_translation(unit["text"], joined)
+    if probs:
+        _record_attempt(unit, unit["text"], "assembled", probs, joined)
+        return None, None, [], probs
+    raw_joined = assemble_segments(unit["text"], raws) if raws != outputs else None
+    return joined, raw_joined, flags, []
 
-    return None, None, [], last_probs
 
-
-def _load_checkpoint(ckpt_path: Path) -> dict[str, dict[str, Any]]:
+def _load_checkpoint(
+    ckpt_path: Path,
+    legacy_wid_to_key: dict[str, str] | None = None,
+) -> tuple[dict[str, dict[str, Any]], int]:
     done: dict[str, dict[str, Any]] = {}
+    migrated = 0
     if not ckpt_path.is_file():
-        return done
+        return done, migrated
     with open(ckpt_path, "r", encoding="utf-8-sig") as handle:
         for raw in handle:
             s = raw.strip()
@@ -807,11 +953,193 @@ def _load_checkpoint(ckpt_path: Path) -> dict[str, dict[str, Any]]:
                 obj = json.loads(s)
             except ValueError:
                 continue
-            wid = obj.get("wid")
             zh_cn = obj.get("zh_cn")
-            if isinstance(wid, str) and isinstance(zh_cn, str) and zh_cn.strip():
-                done[wid] = obj
-    return done
+            if not isinstance(zh_cn, str) or not zh_cn.strip():
+                continue
+            uk = obj.get("unit_key")
+            if isinstance(uk, str) and uk.strip():
+                done[uk] = obj
+                continue
+            wid = obj.get("wid")
+            if isinstance(wid, str) and legacy_wid_to_key and wid in legacy_wid_to_key:
+                key = legacy_wid_to_key[wid]
+                done[key] = {**obj, "unit_key": key}
+                migrated += 1
+    return done, migrated
+
+
+def load_overrides_file(path: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """Load manual overrides keyed by record id and/or unit_key."""
+    by_id: dict[str, str] = {}
+    by_key: dict[str, str] = {}
+    if not path.is_file():
+        return by_id, by_key
+    with open(path, "r", encoding="utf-8-sig") as handle:
+        for lineno, raw in enumerate(handle, start=1):
+            s = raw.strip()
+            if not s:
+                continue
+            obj = json.loads(s)
+            val = obj.get("translation")
+            if val is None:
+                val = obj.get("zh_cn")
+            if val is None:
+                val = obj.get("override")
+            if obj.get("status") == "kept_source" and not str(val or "").strip():
+                continue  # review row the operator has not filled in yet
+            if not isinstance(val, str) or not val.strip():
+                raise schema.SchemaError(
+                    f"{path.name}:{lineno}: override requires non-empty translation/zh_cn/override"
+                )
+            rid = obj.get("id")
+            uk = obj.get("unit_key")
+            if isinstance(rid, str) and rid.strip():
+                by_id[rid] = val
+            elif isinstance(uk, str) and uk.strip():
+                by_key[uk] = val
+            elif isinstance(obj.get("kind"), str) and isinstance(obj.get("text"), str):
+                by_key[make_unit_key(obj["kind"], obj.get("speaker"), obj["text"])] = val
+            else:
+                raise schema.SchemaError(
+                    f"{path.name}:{lineno}: override row needs 'id', 'unit_key', or ('kind' + 'text')"
+                )
+    return by_id, by_key
+
+
+def _revalidate_checkpoint(
+    done_map: dict[str, dict[str, Any]],
+    units_by_key: dict[str, dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, list[str]]]:
+    """Drop cached rows that fail the CURRENT validators so they get retranslated."""
+    valid: dict[str, dict[str, Any]] = {}
+    rejected: dict[str, list[str]] = {}
+    for key, row in done_map.items():
+        unit = units_by_key.get(key)
+        if unit is None:
+            valid[key] = row
+            continue
+        errs = validate_unit_translation(unit["text"], row["zh_cn"])
+        if errs:
+            rejected[key] = errs
+        else:
+            valid[key] = row
+    return valid, rejected
+
+
+def _make_attempt_sink(path: Path) -> Any:
+    """Append-only diagnostics; never deleted, and a write error never stops the job."""
+    lock = threading.Lock()
+
+    def _sink(entry: dict[str, Any]) -> None:
+        line = json.dumps({"at": schema.utc_now_iso(), **entry}, ensure_ascii=False) + "\n"
+        try:
+            with lock, open(path, "a", encoding="utf-8", newline="\n") as fh:
+                fh.write(line)
+        except OSError as exc:
+            print(f"[attempts] warn: could not append {path.name}: {exc}")
+
+    return _sink
+
+
+def untranslated_limit(total_records: int, max_ratio: float) -> int:
+    return int(total_records * max_ratio + 1e-9)
+
+
+def is_partial_summary(summary: dict[str, Any]) -> bool:
+    return bool(
+        summary.get("missing", 0)
+        or summary.get("no_cjk", 0)
+        or summary.get("latin_only", 0)
+        or summary.get("over_untranslated_limit", False)
+        or summary.get("transport_failed_units", 0)
+    )
+
+
+def load_overrides_file(path: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """Load manual overrides keyed by record id and/or unit_key."""
+    by_id: dict[str, str] = {}
+    by_key: dict[str, str] = {}
+    if not path.is_file():
+        return by_id, by_key
+    with open(path, "r", encoding="utf-8-sig") as handle:
+        for lineno, raw in enumerate(handle, start=1):
+            s = raw.strip()
+            if not s:
+                continue
+            obj = json.loads(s)
+            val = obj.get("translation")
+            if val is None:
+                val = obj.get("zh_cn")
+            if val is None:
+                val = obj.get("override")
+            if obj.get("status") == "kept_source" and not str(val or "").strip():
+                continue  # review row the operator has not filled in yet
+            if not isinstance(val, str) or not val.strip():
+                raise schema.SchemaError(
+                    f"{path.name}:{lineno}: override requires non-empty translation/zh_cn/override"
+                )
+            rid = obj.get("id")
+            uk = obj.get("unit_key")
+            if isinstance(rid, str) and rid.strip():
+                by_id[rid] = val
+            elif isinstance(uk, str) and uk.strip():
+                by_key[uk] = val
+            elif isinstance(obj.get("kind"), str) and isinstance(obj.get("text"), str):
+                by_key[make_unit_key(obj["kind"], obj.get("speaker"), obj["text"])] = val
+            else:
+                raise schema.SchemaError(
+                    f"{path.name}:{lineno}: override row needs 'id', 'unit_key', or ('kind' + 'text')"
+                )
+    return by_id, by_key
+
+
+def _revalidate_checkpoint(
+    done_map: dict[str, dict[str, Any]],
+    units_by_key: dict[str, dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, list[str]]]:
+    """Drop cached rows that fail the CURRENT validators so they get retranslated."""
+    valid: dict[str, dict[str, Any]] = {}
+    rejected: dict[str, list[str]] = {}
+    for key, row in done_map.items():
+        unit = units_by_key.get(key)
+        if unit is None:
+            valid[key] = row
+            continue
+        errs = validate_unit_translation(unit["text"], row["zh_cn"])
+        if errs:
+            rejected[key] = errs
+        else:
+            valid[key] = row
+    return valid, rejected
+
+
+def _make_attempt_sink(path: Path) -> Any:
+    """Append-only diagnostics; never deleted, and a write error never stops the job."""
+    lock = threading.Lock()
+
+    def _sink(entry: dict[str, Any]) -> None:
+        line = json.dumps({"at": schema.utc_now_iso(), **entry}, ensure_ascii=False) + "\n"
+        try:
+            with lock, open(path, "a", encoding="utf-8", newline="\n") as fh:
+                fh.write(line)
+        except OSError as exc:
+            print(f"[attempts] warn: could not append {path.name}: {exc}")
+
+    return _sink
+
+
+def untranslated_limit(total_records: int, max_ratio: float) -> int:
+    return int(total_records * max_ratio + 1e-9)
+
+
+def is_partial_summary(summary: dict[str, Any]) -> bool:
+    return bool(
+        summary.get("missing", 0)
+        or summary.get("no_cjk", 0)
+        or summary.get("latin_only", 0)
+        or summary.get("over_untranslated_limit", False)
+        or summary.get("transport_failed_units", 0)
+    )
 
 
 def _append_checkpoint_rows(
@@ -864,6 +1192,17 @@ def _log_gpu_progress(done_count: int, total_count: int, gpu_log: Path, skip_gpu
         print(f"[progress] warn: could not append {gpu_log.name}: {exc}")
 
 
+def _failure_record(unit: dict[str, Any], errs: list[str]) -> dict[str, Any]:
+    return {
+        "unit_key": unit["unit_key"],
+        "wid": unit["wid"],
+        "text": unit["text"],
+        "errors": errs,
+        "expected_placeholders": schema.extract_placeholders(unit["text"]),
+        "source_kind": unit["kind"],
+    }
+
+
 def translate_job(
     job: str,
     input_path: Path,
@@ -875,9 +1214,19 @@ def translate_job(
     force: bool = False,
     manifest_wait: float = 60.0,
     skip_gpu_check: bool = False,
+    overrides_path: Path | None = None,
+    repair_only: bool = False,
+    assemble_only: bool = False,
+    max_untranslated_ratio: float = DEFAULT_MAX_UNTRANSLATED_RATIO,
 ) -> dict[str, Any]:
+    global _ATTEMPT_SINK
     try:
-        if not force and schema.done_marker_path(output_dir, job).is_file():
+        if (
+            not force
+            and not repair_only
+            and not assemble_only
+            and schema.done_marker_path(output_dir, job).is_file()
+        ):
             schema.verify_done_marker(output_dir, job)
             print(f"[job] {job}: DONE marker verified, skipping (use --force to rerun)")
             return {"job": job, "status": "skipped_done"}
@@ -888,42 +1237,75 @@ def translate_job(
     records = schema.validate_jsonl_file(input_path)
     glossary_cn = _prepare_glossary_simplified(glossary_entries)
 
+    eff_overrides = overrides_path if overrides_path is not None else input_path.with_name(f"{job}.overrides.jsonl")
+    ov_by_id, ov_by_key = load_overrides_file(eff_overrides) if eff_overrides.is_file() else ({}, {})
+
+    # Legacy checkpoints are keyed by sequential wid. Rebuild that numbering with the OLD
+    # "has an ASCII letter" rule (control-code letters included) so rows map to the same text.
+    legacy_wid_to_key: dict[str, str] = {}
+    legacy_seen: set[str] = set()
+    for rec in records:
+        if rec.get("override") is not None or not _EN_PRESENT_RE.search(rec["text"]):
+            continue
+        uk = make_unit_key(rec["kind"], rec.get("speaker"), rec["text"])
+        if uk not in legacy_seen:
+            legacy_seen.add(uk)
+            legacy_wid_to_key[f"w{len(legacy_seen):06d}"] = uk
+
     work_units: list[dict[str, Any]] = []
-    key_to_wid: dict[tuple[str, str, str], str] = {}
-    rec_to_wid: dict[str, str] = {}
+    seen_keys: dict[str, dict[str, Any]] = {}
+    rec_to_unit_key: dict[str, str] = {}
+    override_cn: dict[str, str] = {}
     passthrough_cn: dict[str, str] = {}
 
     for rec in records:
+        rid = rec["id"]
         if rec.get("override") is not None:
-            passthrough_cn[rec["id"]] = output_to_simplified(str(rec["override"]))
+            override_cn[rid] = output_to_simplified(str(rec["override"]))
+            continue
+        if rid in ov_by_id:
+            override_cn[rid] = output_to_simplified(ov_by_id[rid])
+            continue
+        uk = make_unit_key(rec["kind"], rec.get("speaker"), rec["text"])
+        if uk in ov_by_key:
+            override_cn[rid] = output_to_simplified(ov_by_key[uk])
             continue
         if not needs_translation(rec):
-            passthrough_cn[rec["id"]] = rec["text"]
+            passthrough_cn[rid] = rec["text"]
             continue
-        key = (rec["kind"], rec.get("speaker") or "", rec["text"])
-        if key not in key_to_wid:
-            wid = f"w{len(work_units) + 1:06d}"
-            key_to_wid[key] = wid
-            work_units.append(
-                {
-                    "wid": wid,
-                    "file": rec["file"],
-                    "kind": rec["kind"],
-                    "speaker": rec.get("speaker"),
-                    "text": rec["text"],
-                }
-            )
-        rec_to_wid[rec["id"]] = key_to_wid[key]
+        if uk not in seen_keys:
+            unit_obj = {
+                "unit_key": uk,
+                "wid": f"w{len(work_units) + 1:06d}",
+                "file": rec["file"],
+                "kind": rec["kind"],
+                "speaker": rec.get("speaker"),
+                "text": rec["text"],
+            }
+            seen_keys[uk] = unit_obj
+            work_units.append(unit_obj)
+        rec_to_unit_key[rid] = uk
 
     ckpt_path = work_dir / f"{job}.checkpoint.jsonl"
     failures_path = work_dir / f"{job}.failures.jsonl"
     gpu_log = work_dir / f"{job}.gpu.log"
-    done_map = _load_checkpoint(ckpt_path)
+    done_map, migrated = _load_checkpoint(ckpt_path, legacy_wid_to_key=legacy_wid_to_key)
+    if migrated:
+        print(f"[ckpt] Migrated {migrated} legacy wid-only checkpoint rows by unit_key")
+    done_map, rejected = _revalidate_checkpoint(done_map, seen_keys)
+    if rejected:
+        reasons: dict[str, int] = {}
+        for errs in rejected.values():
+            for err in errs:
+                reasons[err] = reasons.get(err, 0) + 1
+        print(f"[ckpt] {len(rejected)} cached units failed current validation, not reused: {reasons}")
 
-    todo_units = [u for u in work_units if u["wid"] not in done_map]
+    todo_units = [u for u in work_units if u["unit_key"] not in done_map]
+    cached_count = len(work_units) - len(todo_units)
     print(
         f"[job] {job}: total={len(records)} | passthrough={len(passthrough_cn)} | "
-        f"unique_work={len(work_units)} | cached={len(done_map)} | todo={len(todo_units)}"
+        f"overrides={len(override_cn)} | unique_work={len(work_units)} | "
+        f"cached={cached_count} | todo={len(todo_units)}"
     )
 
     by_file: dict[str, list[dict[str, Any]]] = {}
@@ -935,9 +1317,14 @@ def translate_job(
         step = max(4, (len(items) + N_PARALLEL - 1) // N_PARALLEL)
         queues = [items[i : i + step] for i in range(0, len(items), step)]
 
+    if assemble_only:
+        queues = []
+    # This run rewrites the outputs: drop any earlier DONE marker until the new result passes.
+    schema.done_marker_path(output_dir, job).unlink(missing_ok=True)
+
     ckpt_lock = threading.Lock()
     gpu_log_lock = threading.Lock()
-    progress_counter = {"count": len(done_map)}
+    progress_counter = {"count": cached_count}
     all_failures: list[dict[str, Any]] = []
 
     def _flush_pending(pending: list[dict[str, Any]]) -> None:
@@ -948,7 +1335,7 @@ def translate_job(
         with ckpt_lock:
             _append_checkpoint_rows(ckpt_path, pending)
             for row in pending:
-                done_map[row["wid"]] = row
+                done_map[row["unit_key"]] = row
             prev = progress_counter["count"]
             progress_counter["count"] += len(pending)
             cur_done = progress_counter["count"]
@@ -969,7 +1356,7 @@ def translate_job(
                 if cn is not None:
                     if u["kind"] not in ("ui", "system"):
                         context = (context + [u["text"]])[-3:]
-                    row: dict[str, Any] = {"wid": u["wid"], "zh_cn": cn}
+                    row: dict[str, Any] = {"unit_key": u["unit_key"], "wid": u["wid"], "zh_cn": cn}
                     if raw_saved is not None:
                         row["raw"] = raw_saved
                     if flags:
@@ -978,44 +1365,91 @@ def translate_job(
                     if len(pending_rows) >= 10:
                         _flush_pending(pending_rows)
                 else:
-                    q_failures.append({"wid": u["wid"], "text": u["text"], "errors": probs})
+                    q_failures.append(_failure_record(u, probs))
         finally:
             _flush_pending(pending_rows)
         return q_failures
 
     if queues:
-        with ThreadPoolExecutor(max_workers=N_PARALLEL) as pool:
-            for q_fail in pool.map(_run_queue, queues):
-                all_failures.extend(q_fail)
+        _ATTEMPT_SINK = _make_attempt_sink(work_dir / f"{job}.attempts.jsonl")
+        try:
+            with ThreadPoolExecutor(max_workers=N_PARALLEL) as pool:
+                for q_fail in pool.map(_run_queue, queues):
+                    all_failures.extend(q_fail)
+        finally:
+            _ATTEMPT_SINK = None
+
+    if assemble_only:
+        previous: dict[str, dict[str, Any]] = {}
+        if failures_path.is_file():
+            with open(failures_path, "r", encoding="utf-8-sig") as handle:
+                for raw in handle:
+                    if raw.strip():
+                        obj = json.loads(raw)
+                        if obj.get("unit_key"):
+                            previous[obj["unit_key"]] = obj
+        for unit in todo_units:
+            all_failures.append(
+                previous.get(unit["unit_key"])
+                or _failure_record(unit, rejected.get(unit["unit_key"]) or ["not_translated"])
+            )
 
     if all_failures:
         failures_txt = "".join(json.dumps(f, ensure_ascii=False) + "\n" for f in all_failures)
         schema.atomic_write_text(failures_path, failures_txt)
-        print(f"[job] {job}: {len(all_failures)} units failed -> {failures_path}")
     elif failures_path.exists():
         failures_path.unlink()
+    failure_by_key = {f["unit_key"]: f for f in all_failures}
 
-    final_done = _load_checkpoint(ckpt_path)
+    final_done, _ = _load_checkpoint(ckpt_path, legacy_wid_to_key=legacy_wid_to_key)
+    final_done, _ = _revalidate_checkpoint(final_done, seen_keys)
+    review: dict[str, dict[str, Any]] = {}
+    kept_rows = 0
     missing_ids: list[str] = []
     cn_rows: list[dict[str, Any]] = []
     tw_rows: list[dict[str, Any]] = []
     zh_cn_texts: list[str] = []
     zh_tw_texts: list[str] = []
 
-    for rec in records:
+    for line_no, rec in enumerate(records, start=1):
         rid = rec["id"]
-        if rid in passthrough_cn:
+        kept_source = False
+        if rid in override_cn:
+            cn_val = override_cn[rid]
+        elif rid in passthrough_cn:
             cn_val = passthrough_cn[rid]
         else:
-            wid = rec_to_wid[rid]
-            entry = final_done.get(wid)
-            if not entry:
+            uk = rec_to_unit_key[rid]
+            entry = final_done.get(uk)
+            if entry:
+                cn_val = entry["zh_cn"]
+            elif uk in failure_by_key:
+                # Last resort: ship the untouched source line and list it for review.
+                kept_source = True
+                kept_rows += 1
+                cn_val = rec["text"]
+                if uk not in review:
+                    review[uk] = {
+                        "unit_key": uk,
+                        "status": "kept_source",
+                        "translation": "",
+                        "text": rec["text"],
+                        "kind": rec["kind"],
+                        "speaker": rec.get("speaker"),
+                        "first_line": line_no,
+                        "first_id": rid,
+                        "rows": 0,
+                        "errors": failure_by_key[uk]["errors"],
+                    }
+                review[uk]["rows"] += 1
+            else:
                 missing_ids.append(rid)
                 cn_val = ""
-            else:
-                cn_val = entry["zh_cn"]
-        tw_val = to_traditional(cn_val, mode=tw_mode) if cn_val else ""
-        if cn_val:
+        if kept_source:
+            tw_val = cn_val  # untouched source, never run through OpenCC
+        else:
+            tw_val = to_traditional(cn_val, mode=tw_mode) if cn_val else ""
+        if cn_val and not kept_source:
             zh_cn_texts.append(cn_val)
             zh_tw_texts.append(tw_val)
         base_out = {
@@ -1028,13 +1462,24 @@ def translate_job(
         cn_rows.append({**base_out, "translation": cn_val})
         tw_rows.append({**base_out, "translation": tw_val})
 
+    limit = untranslated_limit(len(records), max_untranslated_ratio)
+    transport_units = sum(
+        1 for item in review.values() if any(e.startswith("transport:") for e in item["errors"])
+    )
     qa_summary = {
         "job": job,
         "total_records": len(records),
         "unique_work_units": len(work_units),
         "passthrough_records": len(passthrough_cn),
+        "manual_overrides": len(override_cn),
         "missing": len(missing_ids),
-        "failures": len(all_failures),
+        "failures": len(review),
+        "kept_source_units": len(review),
+        "kept_source_rows": kept_rows,
+        "kept_source_limit_rows": limit,
+        "over_untranslated_limit": kept_rows > limit,
+        "transport_failed_units": transport_units,
+        "cache_rejected_units": len(rejected),
         "tw_mode": tw_mode,
         "watch_chars": schema.count_watch_chars(zh_cn_texts, zh_tw_texts),
         "generated_at_utc": schema.utc_now_iso(),
@@ -1043,6 +1488,7 @@ def translate_job(
     cn_out = output_dir / f"{job}.zh_CN.jsonl"
     tw_out = output_dir / f"{job}.zh_TW.jsonl"
     qa_out = output_dir / f"{job}.qa_report.json"
+    review_out = output_dir / f"{job}.review.jsonl"
 
     schema.atomic_write_text(
         cn_out, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in cn_rows)
@@ -1051,16 +1497,30 @@ def translate_job(
         tw_out, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in tw_rows)
     )
     schema.atomic_write_json(qa_out, qa_summary)
+    schema.atomic_write_text(
+        review_out,
+        "".join(
+            json.dumps(item, ensure_ascii=False) + "\n"
+            for item in sorted(review.values(), key=lambda i: i["first_line"])
+        ),
+    )
 
-    if not missing_ids and not all_failures:
-        marker = schema.build_done_marker(job, [cn_out, tw_out, qa_out], qa_summary)
+    complete = not is_partial_summary(qa_summary)
+    if complete:
+        marker = schema.build_done_marker(job, [cn_out, tw_out, qa_out, review_out], qa_summary)
         schema.atomic_write_json(schema.done_marker_path(output_dir, job), marker)
-        print(f"[job] {job}: COMPLETE 100% ({len(records)}/{len(records)}) -> {tw_out.name}")
-    else:
-        print(
-            f"[job] {job}: INCOMPLETE missing={len(missing_ids)} failures={len(all_failures)}; "
-            "DONE marker NOT written"
-        )
+    model_rows = len(records) - len(missing_ids) - kept_rows - len(override_cn) - len(passthrough_cn)
+    status = "DONE" if complete else "PARTIAL"
+    print(f"[{status}] {job}: {len(records) - len(missing_ids)} / {len(records)} 列已輸出 -> {tw_out.name}")
+    print(f"  模型翻譯通過檢查：{model_rows}")
+    print(f"  人工指定／免翻：  {len(override_cn)} / {len(passthrough_cn)}")
+    print(f"  待你檢查（保留英文原文）：{kept_rows}（上限 {limit}）")
+    if review:
+        print(f"  檢查清單：{review_out.name}")
+    if transport_units:
+        print(f"  [warn] {transport_units} 個單元沒有拿到模型回應（連線／server 問題），請用 --repair-only 重跑")
+    if missing_ids:
+        print(f"  [warn] missing={len(missing_ids)}")
     return qa_summary
 
 
@@ -1070,6 +1530,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--api-base", help="Use an already-running OpenAI-compatible /v1 endpoint")
     ap.add_argument("--tw-mode", default="s2twp", choices=("s2twp", "s2t"))
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--repair-only", action="store_true", help="Resume from checkpoint and repair remaining units only")
+    ap.add_argument("--job", help="Run only the named job (<job>.jsonl)")
+    ap.add_argument("--overrides", help="Optional path to overrides JSONL file")
+    ap.add_argument(
+        "--assemble-only",
+        action="store_true",
+        help="No server, no model calls: rebuild outputs from checkpoint + overrides",
+    )
+    ap.add_argument(
+        "--max-untranslated-ratio",
+        type=float,
+        default=DEFAULT_MAX_UNTRANSLATED_RATIO,
+        help="Share of rows that may keep the source text and still count as DONE",
+    )
     ap.add_argument("--skip-gpu-check", action="store_true")
     ap.add_argument("--manifest-wait", type=float, default=60.0)
     ap.add_argument("--min-tps", type=float, default=DEFAULT_MIN_TPS)
@@ -1089,7 +1563,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if p.name.startswith(".") or p.name.lower() == "desktop.ini":
             continue
-        if p.name.endswith(".manifest.json"):
+        if p.name.endswith(".manifest.json") or p.name.endswith(".overrides.jsonl"):
             continue
         if p.suffix.lower() != ".jsonl":
             raise schema.SchemaError(
@@ -1099,8 +1573,16 @@ def main(argv: list[str] | None = None) -> int:
     job_files = sorted(
         p
         for p in input_dir.iterdir()
-        if p.is_file() and not p.name.startswith(".") and p.suffix.lower() == ".jsonl"
+        if p.is_file()
+        and not p.name.startswith(".")
+        and p.suffix.lower() == ".jsonl"
+        and not p.name.endswith(".overrides.jsonl")
     )
+    if args.job:
+        target_name = schema.validate_job_name(args.job)
+        job_files = [p for p in job_files if p.stem == target_name]
+        if not job_files:
+            raise FileNotFoundError(f"Requested --job {target_name!r} not found in {input_dir}")
     if not job_files:
         print(f"[runner] No .jsonl jobs found in {input_dir}")
         return EXIT_OK
@@ -1114,7 +1596,9 @@ def main(argv: list[str] | None = None) -> int:
 
     proc: subprocess.Popen[Any] | None = None
     try:
-        if args.api_base:
+        if args.assemble_only:
+            api_base = ""
+        elif args.api_base:
             api_base = args.api_base.rstrip("/")
             if not args.skip_gpu_check:
                 run_preflight_gate(api_base, min_tps=args.min_tps)
@@ -1151,23 +1635,28 @@ def main(argv: list[str] | None = None) -> int:
                 force=args.force,
                 manifest_wait=args.manifest_wait,
                 skip_gpu_check=args.skip_gpu_check,
+                overrides_path=Path(args.overrides) if args.overrides else None,
+                repair_only=args.repair_only,
+                assemble_only=args.assemble_only,
+                max_untranslated_ratio=args.max_untranslated_ratio,
             )
             if proc is not None and proc.poll() is not None:
                 raise RuntimeError(
                     f"llama-server exited unexpectedly during job {jf.stem!r} (rc={proc.returncode}); "
                     "completed progress was saved to checkpoint.jsonl"
                 )
-            if summary.get("failures", 0) or summary.get("missing", 0):
+            if is_partial_summary(summary):
                 partial_jobs.append(summary)
         if partial_jobs:
             print(
-                "[runner] PARTIAL_COMPLETE: all jobs finished running, outputs/checkpoint/failures saved, "
-                ".DONE.json NOT written for incomplete jobs:"
+                "[runner] PARTIAL_COMPLETE: all jobs finished running and outputs are saved; "
+                ".DONE.json NOT written for:"
             )
             for pj in partial_jobs:
                 print(
-                    f"  - {pj['job']}: missing={pj.get('missing', 0)} failures={pj.get('failures', 0)} "
-                    f"-> {work_dir / (pj['job'] + '.failures.jsonl')}"
+                    f"  - {pj['job']}: 待補 {pj.get('kept_source_rows', 0)} 列"
+                    f"（上限 {pj.get('kept_source_limit_rows', 0)}） missing={pj.get('missing', 0)} "
+                    f"-> {output_dir / (pj['job'] + '.review.jsonl')}"
                 )
             return EXIT_PARTIAL
         return EXIT_OK

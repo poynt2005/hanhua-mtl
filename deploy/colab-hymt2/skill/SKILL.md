@@ -31,12 +31,11 @@ python deploy/colab-hymt2/drive_bridge.py push --input <job.jsonl> [--glossary <
 # 3. After user confirms Colab finished (either rc=0 [DONE] or rc=2 [PARTIAL]), check QA/DONE:
 python deploy/colab-hymt2/drive_bridge.py status --name <job>
 
-# 3a. If [PARTIAL] (rc=2) and all remaining failures are resolved by adding "override" to the input .jsonl + `push --force` (todo=0),
-#     assemble .DONE.json locally in seconds with ZERO Colab GPU usage:
-python <instructions_dir>/runner.py --drive-root "<drive_root>" --api-base http://127.0.0.1:9/v1 --skip-gpu-check --manifest-wait 0
-#     Otherwise adjust glossary/partial overrides, `push --force`, and rerun latest hymt2_colab.ipynb (checkpoint.jsonl resumes automatically).
+# 3a. Rebuild from checkpoint + <job>.overrides.jsonl with ZERO Colab GPU usage and no model calls:
+python <instructions_dir>/runner.py --drive-root "<drive_root>" --assemble-only --job <job> --manifest-wait 0
+#     To have the model retry: run the latest notebook with REPAIR_ONLY=True & TARGET_JOB="<job>".
 
-# 3b. Once DONE verified (or to retest post-DONE: add "override" + `push --force` + local `--skip-gpu-check`, or delete target wid rows in checkpoint.jsonl + FORCE_RERUN=True),
-#     pull verified files, verify saved locally, and only then clean up hymt2/{input,work,output}/ for that job.
+# 3b. [DONE] can still contain untranslated English rows: always report <job>.review.jsonl to the user.
+#     Pull verified files, confirm they are saved locally, and only then clean up hymt2/{input,work,output}/.
 python deploy/colab-hymt2/drive_bridge.py pull --name <job> --dest <out_dir>
 ```

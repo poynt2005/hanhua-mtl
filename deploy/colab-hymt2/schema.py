@@ -23,6 +23,12 @@ MAX_TEXT_LEN = 1500
 JOB_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 PLACEHOLDER_RE = re.compile(r"\{\{[^}]+\}\}|⟦\d+⟧|\\[A-Za-z]+\[\d+\]")
 
+# Inline engine control codes such as "_w!10,0,". The runner keeps these away from
+# the model: text is split around them and they are re-inserted byte-for-byte.
+CONTROL_CODE_RE = re.compile(r"_[A-Za-z]+!(?:-?\d+,)+")
+# Other markup shapes that are NOT protected automatically (used for warnings only).
+SUSPECT_CODE_RE = re.compile(r"<[A-Za-z/][^<>]{0,40}>|\\[A-Za-z]+|%[a-z]|\[[a-z]+[=\]]|_[A-Za-z]+!")
+
 WATCH_CHAR_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("发", ("发", "髮", "發")),
     ("后", ("后", "後")),
@@ -155,6 +161,20 @@ def validate_job_name(job: str) -> str:
 
 def extract_placeholders(text: str) -> list[str]:
     return PLACEHOLDER_RE.findall(text or "")
+
+
+def extract_control_codes(text: str) -> list[str]:
+    return CONTROL_CODE_RE.findall(text or "")
+
+
+def find_unprotected_codes(records: list[dict[str, Any]]) -> dict[str, int]:
+    """Count markup-like tokens the runner will send to the model as plain text."""
+    found: dict[str, int] = {}
+    for rec in records:
+        rest = PLACEHOLDER_RE.sub("", CONTROL_CODE_RE.sub("", rec.get("text") or ""))
+        for token in SUSPECT_CODE_RE.findall(rest):
+            found[token] = found.get(token, 0) + 1
+    return found
 
 
 def count_watch_chars(zh_cn_texts: list[str], zh_tw_texts: list[str]) -> dict[str, dict[str, int]]:
